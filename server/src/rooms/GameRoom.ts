@@ -6,10 +6,13 @@ import {
   Msg,
   BLOCKS,
   BlockType,
+  bedTeam,
+  TEAMS,
   TICK_MS,
   REACH,
   VOID_Y,
   TEAM_COUNT,
+  RESPAWN_SECONDS,
   PLAYER_HALF_W,
   PLAYER_HEIGHT,
   type SpawnPoint,
@@ -21,9 +24,9 @@ import {
 } from '@bedwars/shared';
 import { BedwarsState, PlayerState } from '../schema/GameState';
 
-const MAX_INPUTS_PER_TICK = 8; // ~60fps client inputs per 50ms tick, with headroom
+const MAX_INPUTS_PER_TICK = 8;
 const MAX_QUEUE = MAX_INPUTS_PER_TICK * 2;
-const MAX_DIFFS = 20000; // cap the join-sync diff log
+const MAX_DIFFS = 20000;
 
 export class GameRoom extends Room<BedwarsState> {
   maxClients = 16;
@@ -33,6 +36,7 @@ export class GameRoom extends Room<BedwarsState> {
   private diffs: BlockDiff[] = [];
   private phys = new Map<string, PlayerPhysics>();
   private queues = new Map<string, MoveInput[]>();
+  private respawnAt = new Map<string, number>();
 
   onCreate(): void {
     this.setState(new BedwarsState());
@@ -51,6 +55,7 @@ export class GameRoom extends Room<BedwarsState> {
 
     this.onMessage(Msg.Place, (client, m: PlaceMessage) => this.tryPlace(client, m));
     this.onMessage(Msg.Break, (client, m: BreakMessage) => this.tryBreak(client, m));
+    this.onMessage(Msg.Ping, (client, t: number) => client.send(Msg.Pong, t));
 
     this.setSimulationInterval(() => this.tick(), TICK_MS);
   }
@@ -66,33 +71,60 @@ export class GameRoom extends Room<BedwarsState> {
     this.state.players.set(client.sessionId, p);
     this.phys.set(client.sessionId, { x: spawn.x, y: spawn.y, z: spawn.z, vy: 0, onGround: false });
     this.queues.set(client.sessionId, []);
-    // Client generates the base map deterministically; only send the diff log.
     client.send(Msg.WorldInit, { diffs: this.diffs });
+    this.feed(`A player joined ${TEAMS[team].name} team`);
   }
 
   onLeave(client: Client): void {
     this.state.players.delete(client.sessionId);
     this.phys.delete(client.sessionId);
     this.queues.delete(client.sessionId);
+    this.respawnAt.delete(client.sessionId);
+    this.checkWin();
   }
 
   private tick(): void {
+    const now = Date.now();
     this.state.players.forEach((p, id) => {
       const phys = this.phys.get(id);
       const q = this.queues.get(id);
       if (!phys || !q) return;
+
+      if (!p.alive) {
+        q.length = 0; // discard inputs while dead
+        const at = this.respawnAt.get(id);
+        if (at !== undefined && now >= at) this.respawn(id);
+        return;
+      }
+
       const inputs = q.splice(0, MAX_INPUTS_PER_TICK);
       for (const input of inputs) {
-        stepPlayer(phys, input, this.world.isSolid); // dt clamped inside
+        stepPlayer(phys, input, this.world.isSolid);
         p.yaw = input.yaw;
         p.lastSeq = input.seq >>> 0;
       }
-      if (phys.y < VOID_Y) this.respawn(id);
+      if (phys.y < VOID_Y) this.die(id);
       p.x = phys.x;
       p.y = phys.y;
       p.z = phys.z;
       p.vy = phys.vy;
     });
+  }
+
+  private die(id: string): void {
+    const p = this.state.players.get(id);
+    if (!p || !p.alive) return;
+    p.alive = false;
+    p.hp = 0;
+    const bedAlive = ((this.state.bedsAlive >> p.team) & 1) === 1;
+    if (bedAlive) {
+      this.respawnAt.set(id, Date.now() + RESPAWN_SECONDS * 1000);
+      this.feed(`${TEAMS[p.team].name} player fell into the void`);
+    } else {
+      this.respawnAt.delete(id);
+      this.feed(`${TEAMS[p.team].name} player was ELIMINATED`);
+      this.checkWin();
+    }
   }
 
   private respawn(id: string): void {
@@ -105,6 +137,29 @@ export class GameRoom extends Room<BedwarsState> {
     phys.z = s.z;
     phys.vy = 0;
     phys.onGround = false;
+    p.x = s.x;
+    p.y = s.y;
+    p.z = s.z;
+    p.vy = 0;
+    p.hp = 20;
+    p.alive = true;
+    this.respawnAt.delete(id);
+  }
+
+  private checkWin(): void {
+    if (this.state.winner >= 0) return;
+    const teamsPresent = new Set<number>();
+    const teamsInGame = new Set<number>();
+    this.state.players.forEach((p) => {
+      teamsPresent.add(p.team);
+      const bedAlive = ((this.state.bedsAlive >> p.team) & 1) === 1;
+      if (p.alive || bedAlive) teamsInGame.add(p.team);
+    });
+    if (teamsPresent.size >= 2 && teamsInGame.size === 1) {
+      const winner = teamsInGame.values().next().value as number;
+      this.state.winner = winner;
+      this.feed(`${TEAMS[winner].name} team WINS!`);
+    }
   }
 
   private pickTeam(): number {
@@ -121,7 +176,6 @@ export class GameRoom extends Room<BedwarsState> {
     const dx = x + 0.5 - phys.x;
     const dy = y + 0.5 - (phys.y + 1.6);
     const dz = z + 0.5 - phys.z;
-    // Small tolerance over client reach to absorb movement latency.
     return dx * dx + dy * dy + dz * dz <= (REACH + 1.5) ** 2;
   }
 
@@ -141,6 +195,8 @@ export class GameRoom extends Room<BedwarsState> {
   private tryPlace(client: Client, m: PlaceMessage): void {
     const { x, y, z, block } = m ?? {};
     if (!Number.isInteger(x) || !Number.isInteger(y) || !Number.isInteger(z)) return;
+    const p = this.state.players.get(client.sessionId);
+    if (!p?.alive) return;
     const def = BLOCKS[block];
     if (!def?.placeable) return;
     if (!this.world.inBounds(x, y, z)) return;
@@ -153,9 +209,26 @@ export class GameRoom extends Room<BedwarsState> {
   private tryBreak(client: Client, m: BreakMessage): void {
     const { x, y, z } = m ?? {};
     if (!Number.isInteger(x) || !Number.isInteger(y) || !Number.isInteger(z)) return;
+    const p = this.state.players.get(client.sessionId);
+    if (!p?.alive) return;
     const b = this.world.get(x, y, z);
     if (b === BlockType.Air || !BLOCKS[b]?.breakable) return;
     if (!this.inReach(client.sessionId, x, y, z)) return;
+
+    const bt = bedTeam(b);
+    if (bt >= 0) {
+      if (p.team === bt) return; // can't break your own bed
+      // Destroy both halves of the bed.
+      this.applyBlock(x, y, z, BlockType.Air);
+      for (const [ox, oz] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
+        if (this.world.get(x + ox, y, z + oz) === b) this.applyBlock(x + ox, y, z + oz, BlockType.Air);
+      }
+      this.state.bedsAlive &= ~(1 << bt);
+      this.feed(`${TEAMS[bt].name} bed was destroyed by ${TEAMS[p.team].name}! They can no longer respawn.`);
+      this.checkWin();
+      return;
+    }
+
     this.applyBlock(x, y, z, BlockType.Air);
   }
 
@@ -163,5 +236,9 @@ export class GameRoom extends Room<BedwarsState> {
     this.world.set(x, y, z, b);
     if (this.diffs.length < MAX_DIFFS) this.diffs.push({ x, y, z, b });
     this.broadcast(Msg.BlockDiff, { x, y, z, b });
+  }
+
+  private feed(text: string): void {
+    this.broadcast(Msg.Feed, { text });
   }
 }

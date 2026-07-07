@@ -2,6 +2,7 @@ import {
   GRAVITY,
   JUMP_VELOCITY,
   MOVE_SPEED,
+  SPRINT_MULT,
   MAX_STEP_DT,
   PLAYER_HALF_W,
   PLAYER_HEIGHT,
@@ -23,6 +24,7 @@ export interface MoveInput {
   moveX: number; // strafe: -1..1
   moveZ: number; // forward: -1..1
   jump: boolean;
+  sprint: boolean;
   yaw: number;
 }
 
@@ -61,10 +63,12 @@ export function stepPlayer(p: PlayerPhysics, input: MoveInput, isSolid: IsSolidF
     mx /= len;
     mz /= len;
   }
+  // Sprint only applies while moving forward (Minecraft rule).
+  const speed = MOVE_SPEED * (input.sprint && input.moveZ > 0 ? SPRINT_MULT : 1);
   const sin = Math.sin(input.yaw);
   const cos = Math.cos(input.yaw);
-  const vx = (mx * cos - mz * sin) * MOVE_SPEED;
-  const vz = (-mz * cos - mx * sin) * MOVE_SPEED;
+  const vx = (mx * cos - mz * sin) * speed;
+  const vz = (-mz * cos - mx * sin) * speed;
 
   if (input.jump && p.onGround) {
     p.vy = JUMP_VELOCITY;

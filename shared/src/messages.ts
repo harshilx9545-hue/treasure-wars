@@ -7,6 +7,9 @@ export const Msg = {
   Break: 'b', // client -> server: BreakMessage
   BlockDiff: 'd', // server -> all: BlockDiff
   WorldInit: 'w', // server -> joining client: WorldInit (diff log only)
+  Ping: 'pg', // client -> server: number (client timestamp)
+  Pong: 'po', // server -> client: number (echoed timestamp)
+  Feed: 'f', // server -> all: FeedMessage (kill feed / events)
 } as const;
 
 export type InputBatch = MoveInput[];
@@ -33,4 +36,8 @@ export interface BlockDiff {
 
 export interface WorldInit {
   diffs: BlockDiff[];
+}
+
+export interface FeedMessage {
+  text: string;
 }
