@@ -1,0 +1,12 @@
+{
+  "name": "bedwars",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": ["shared", "server", "client"],
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "dev:server": "npm --workspace @bedwars/server run dev",
+    "dev:client": "npm --workspace @bedwars/client run dev",
+    "build:client": "npm --workspace @bedwars/client run build"
+  }
+}
