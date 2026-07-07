@@ -71,8 +71,13 @@ export class GameRoom extends Room<BedwarsState> {
     this.state.players.set(client.sessionId, p);
     this.phys.set(client.sessionId, { x: spawn.x, y: spawn.y, z: spawn.z, vy: 0, onGround: false });
     this.queues.set(client.sessionId, []);
-    client.send(Msg.WorldInit, { diffs: this.diffs });
-    this.feed(`A player joined ${TEAMS[team].name} team`);
+    // Defer join-time sends: messages sent synchronously inside onJoin can
+    // reach the client before it registers its onMessage handlers, and
+    // colyseus.js does not queue unregistered messages.
+    this.clock.setTimeout(() => {
+      client.send(Msg.WorldInit, { diffs: this.diffs });
+      this.feed(`A player joined ${TEAMS[team].name} team`);
+    }, 100);
   }
 
   onLeave(client: Client): void {

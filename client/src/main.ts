@@ -89,6 +89,13 @@ const input = new Input(renderer.domElement, overlay);
 const remotes = new RemotePlayers(scene);
 const hud = new HUD();
 
+const DEBUG = new URLSearchParams(location.search).has('debug');
+if (DEBUG) {
+  document.addEventListener('pointerlockchange', () => {
+    console.log('[debug] pointerLock engaged:', document.pointerLockElement === renderer.domElement);
+  });
+}
+
 // --- Hotbar ---
 let HOTBAR: { block: BlockType; label: string }[] = [];
 let activeSlot = 0;
@@ -159,6 +166,7 @@ async function start(): Promise<void> {
     spawned = true;
     myTeam = team;
     setHotbarForTeam(team);
+    if (DEBUG) console.log('[debug] spawned on team', team, 'at', s.x, s.y, s.z);
   }
 
   if (room) {
@@ -178,7 +186,7 @@ async function start(): Promise<void> {
   input.onMouseDown = (button) => {
     swingT = 1; // swing animation on every click
     clicks.push(Date.now());
-    const me: any = room?.state.players.get(myId);
+    const me: any = (room?.state as any)?.players?.get(myId);
     const alive = room ? !!me?.alive : true;
     if (!spawned || !alive) return;
     camera.getWorldDirection(rayDir);
@@ -203,10 +211,13 @@ async function start(): Promise<void> {
     last = now;
 
     // --- Sync players from server state (poll-based: version-proof) ---
+    // Guarded: room.state is empty until the first patch arrives; an
+    // unguarded access here threw per-frame and aborted camera + render.
     let me: any = null;
-    if (room) {
+    const players = room ? (room.state as any)?.players : null;
+    if (room && players) {
       const seen = new Set<string>();
-      room.state.players.forEach((p: any, id: string) => {
+      players.forEach((p: any, id: string) => {
         seen.add(id);
         if (id === myId) {
           me = p;
@@ -331,9 +342,9 @@ async function start(): Promise<void> {
     if (boardTimer >= 0.25) {
       boardTimer = 0;
       const counts = TEAMS.map(() => 0);
-      room?.state.players.forEach((p: any) => { if (p.alive) counts[p.team]++; });
-      if (!room) counts[myTeam] = 1;
-      const bedsAlive: number = room ? room.state.bedsAlive : 0b1111;
+      if (players) players.forEach((p: any) => { if (p.alive) counts[p.team]++; });
+      if (!room || !players) counts[myTeam] = 1;
+      const bedsAlive: number = (room?.state as any)?.bedsAlive ?? 0b1111;
       hud.setScoreboard(TEAMS.map((t, i) => ({
         name: t.name,
         color: `#${t.color.toString(16).padStart(6, '0')}`,
@@ -344,11 +355,11 @@ async function start(): Promise<void> {
     }
 
     // --- Status overlays ---
-    const winner: number = room ? room.state.winner : -1;
+    const winner: number = (room?.state as any)?.winner ?? -1;
     if (winner >= 0) {
       hud.setStatus(`${TEAMS[winner].name.toUpperCase()} TEAM WINS!`);
     } else if (me && !alive) {
-      const bedAlive = ((room!.state.bedsAlive >> me.team) & 1) === 1;
+      const bedAlive = ((((room?.state as any)?.bedsAlive ?? 0b1111) >> me.team) & 1) === 1;
       if (bedAlive) {
         const left = Math.max(0, Math.ceil(RESPAWN_SECONDS - (now - deadSince) / 1000));
         hud.setStatus(`You died! Respawning in ${left}...`);
@@ -357,6 +368,16 @@ async function start(): Promise<void> {
       }
     } else {
       hud.setStatus('');
+    }
+
+    if (DEBUG) {
+      camera.getWorldDirection(rayDir);
+      console.log(
+        `[debug] player(${phys.x.toFixed(2)}, ${phys.y.toFixed(2)}, ${phys.z.toFixed(2)})` +
+        ` cam(${camera.position.x.toFixed(2)}, ${camera.position.y.toFixed(2)}, ${camera.position.z.toFixed(2)})` +
+        ` dir(${rayDir.x.toFixed(2)}, ${rayDir.y.toFixed(2)}, ${rayDir.z.toFixed(2)})` +
+        ` spawned=${spawned} locked=${input.locked}`,
+      );
     }
 
     worldRenderer.update();
