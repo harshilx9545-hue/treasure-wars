@@ -14,6 +14,7 @@ const FACES: { dir: [number, number, number]; shade: number; corners: [number, n
 
 function buildChunkGeometry(world: VoxelWorld, cx: number, cz: number, atlas: Atlas): THREE.BufferGeometry | null {
   const positions: number[] = [];
+  const normals: number[] = [];
   const uvs: number[] = [];
   const colors: number[] = [];
   const indices: number[] = [];
@@ -29,11 +30,33 @@ function buildChunkGeometry(world: VoxelWorld, cx: number, cz: number, atlas: At
         for (const f of FACES) {
           // Hidden-face culling: only emit faces exposed to air.
           if (world.get(x + f.dir[0], y + f.dir[1], z + f.dir[2]) !== BlockType.Air) continue;
+
+          // Tangent axes for this face (for per-vertex ambient occlusion).
+          let a1: number;
+          let a2: number;
+          if (f.dir[0] !== 0) { a1 = 1; a2 = 2; } else if (f.dir[1] !== 0) { a1 = 0; a2 = 2; } else { a1 = 0; a2 = 1; }
+          const nbx = x + f.dir[0];
+          const nby = y + f.dir[1];
+          const nbz = z + f.dir[2];
+
           const ndx = positions.length / 3;
           for (const c of f.corners) {
             positions.push(x + c[0], y + c[1], z + c[2]);
+            normals.push(f.dir[0], f.dir[1], f.dir[2]);
             uvs.push(u0 + c[3] * uw, c[4]);
-            colors.push(f.shade, f.shade, f.shade);
+
+            // Classic voxel AO: check the two side neighbors + corner neighbor
+            // in the face plane, relative to this vertex corner.
+            const o1: [number, number, number] = [0, 0, 0];
+            const o2: [number, number, number] = [0, 0, 0];
+            o1[a1] = c[a1] === 1 ? 1 : -1;
+            o2[a2] = c[a2] === 1 ? 1 : -1;
+            const s1 = world.isSolid(nbx + o1[0], nby + o1[1], nbz + o1[2]) ? 1 : 0;
+            const s2 = world.isSolid(nbx + o2[0], nby + o2[1], nbz + o2[2]) ? 1 : 0;
+            const sc = world.isSolid(nbx + o1[0] + o2[0], nby + o1[1] + o2[1], nbz + o1[2] + o2[2]) ? 1 : 0;
+            const ao = s1 && s2 ? 0 : 3 - (s1 + s2 + sc);
+            const shade = f.shade * (0.55 + 0.15 * ao);
+            colors.push(shade, shade, shade);
           }
           indices.push(ndx, ndx + 1, ndx + 2, ndx + 2, ndx + 1, ndx + 3);
         }
@@ -44,6 +67,7 @@ function buildChunkGeometry(world: VoxelWorld, cx: number, cz: number, atlas: At
   if (indices.length === 0) return null;
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geo.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
   geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
   geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
   geo.setIndex(indices);
@@ -59,14 +83,14 @@ function buildChunkGeometry(world: VoxelWorld, cx: number, cz: number, atlas: At
 export class WorldRenderer {
   private meshes = new Map<string, THREE.Mesh>();
   private dirty = new Set<string>();
-  private material: THREE.MeshBasicMaterial;
+  private material: THREE.MeshLambertMaterial;
 
   constructor(
     private scene: THREE.Scene,
     readonly world: VoxelWorld,
     private atlas: Atlas,
   ) {
-    this.material = new THREE.MeshBasicMaterial({ map: atlas.texture, vertexColors: true });
+    this.material = new THREE.MeshLambertMaterial({ map: atlas.texture, vertexColors: true });
   }
 
   markAllDirty(): void {
@@ -80,11 +104,11 @@ export class WorldRenderer {
     const cx = Math.floor(x / CHUNK);
     const cz = Math.floor(z / CHUNK);
     this.dirty.add(`${cx},${cz}`);
-    // Border blocks also expose/hide faces in neighbor chunks.
-    if (x % CHUNK === 0) this.dirty.add(`${cx - 1},${cz}`);
-    if (x % CHUNK === CHUNK - 1) this.dirty.add(`${cx + 1},${cz}`);
-    if (z % CHUNK === 0) this.dirty.add(`${cx},${cz - 1}`);
-    if (z % CHUNK === CHUNK - 1) this.dirty.add(`${cx},${cz + 1}`);
+    // Border blocks also expose/hide faces (and AO) in neighbor chunks.
+    if (x % CHUNK <= 1) this.dirty.add(`${cx - 1},${cz}`);
+    if (x % CHUNK >= CHUNK - 2) this.dirty.add(`${cx + 1},${cz}`);
+    if (z % CHUNK <= 1) this.dirty.add(`${cx},${cz - 1}`);
+    if (z % CHUNK >= CHUNK - 2) this.dirty.add(`${cx},${cz + 1}`);
   }
 
   update(budget = 4): void {

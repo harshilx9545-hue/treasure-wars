@@ -1,4 +1,4 @@
-/** Pointer-lock FPS input: WASD + mouse look + hotbar keys + mouse buttons. */
+/** Pointer-lock FPS input: WASD + mouse look + sprint + hotbar + mouse buttons. */
 export class Input {
   keys = new Set<string>();
   yaw = 0;
@@ -23,8 +23,8 @@ export class Input {
 
     document.addEventListener('mousemove', (e) => {
       if (!this.locked) return;
-      this.yaw -= e.movementX * 0.0025;
-      this.pitch = Math.max(-1.55, Math.min(1.55, this.pitch - e.movementY * 0.0025));
+      this.yaw -= e.movementX * 0.0022; // Minecraft-like sensitivity
+      this.pitch = Math.max(-1.55, Math.min(1.55, this.pitch - e.movementY * 0.0022));
     });
     document.addEventListener('mousedown', (e) => {
       if (this.locked) this.onMouseDown?.(e.button);
@@ -42,5 +42,9 @@ export class Input {
 
   get jump(): boolean {
     return this.keys.has('Space');
+  }
+
+  get sprint(): boolean {
+    return this.keys.has('ControlLeft') || this.keys.has('ShiftLeft');
   }
 }
