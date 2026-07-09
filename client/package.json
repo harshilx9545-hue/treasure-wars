@@ -11,8 +11,8 @@
   "dependencies": {
     "@bedwars/shared": "0.1.0",
     "colyseus.js": "^0.15.26",
-    "three": "^0.166.0",
-    "serve": "^14.2.4"
+    "serve": "^14.2.4",
+    "three": "^0.166.0"
   },
   "devDependencies": {
     "@types/three": "^0.166.0",
