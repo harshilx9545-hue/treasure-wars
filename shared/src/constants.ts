@@ -2,12 +2,18 @@
 export const TICK_RATE = 20;
 export const TICK_MS = 1000 / TICK_RATE;
 
-// Physics (tuned to Minecraft feel)
+// Physics (tuned to Minecraft feel, then scaled up ~5x for arcade movement)
 export const GRAVITY = -28;
 export const JUMP_VELOCITY = 9.2;
-export const MOVE_SPEED = 4.32; // MC walk ~4.32 m/s
-export const SPRINT_MULT = 1.3; // MC sprint ~5.6 m/s
+export const BASE_MOVE_SPEED = 4.32; // reference MC walk ~4.32 m/s
+export const MOVE_SPEED = BASE_MOVE_SPEED * 5; // ~5x faster movement
+export const SPRINT_MULT = 1.3; // sprint on top of the boosted base
 export const MAX_STEP_DT = 0.05; // clamp per-input integration step
+
+// Smooth acceleration / deceleration (exponential approach rate, 1/s).
+// Higher = snappier. Ground has strong control, air is floaty.
+export const GROUND_ACCEL = 16;
+export const AIR_ACCEL = 5;
 
 // Player AABB
 export const PLAYER_HALF_W = 0.3;
@@ -16,8 +22,17 @@ export const PLAYER_EYE = 1.7;
 
 // Interaction
 export const REACH = 4.5;
+export const ATTACK_REACH = 3.2;
 export const VOID_Y = -12;
 export const RESPAWN_SECONDS = 3;
+
+// Combat
+export const SWORD_DAMAGE = 5; // wooden sword, half-hearts *? -> 5 hp
+export const FIST_DAMAGE = 2;
+export const ATTACK_COOLDOWN_MS = 450;
+export const KNOCKBACK_H = 8.5; // horizontal impulse
+export const KNOCKBACK_V = 6.5; // vertical impulse
+export const CRIT_MULT = 1.5;
 
 // World dimensions (blocks)
 export const WORLD_X = 208;

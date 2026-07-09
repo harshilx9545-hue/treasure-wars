@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { VoxelWorld, CHUNK, BlockType } from '@bedwars/shared';
+import { VoxelWorld, CHUNK, BlockType, isBed } from '@bedwars/shared';
 import type { Atlas } from './atlas';
 
 // Face corners: [x, y, z, u, v]; two triangles per visible face.
@@ -24,12 +24,18 @@ function buildChunkGeometry(world: VoxelWorld, cx: number, cz: number, atlas: At
       for (let y = 0; y < world.sy; y++) {
         const b = world.get(x, y, z);
         if (b === BlockType.Air) continue;
+        // Beds are invisible here — a Treasure chest model is rendered in their
+        // place (treasure.ts). They stay solid in the grid so mining/collision
+        // and all bed gameplay/logic are unchanged.
+        if (isBed(b)) continue;
         const tile = atlas.tileIndex(b);
         const u0 = tile / atlas.tiles;
         const uw = 1 / atlas.tiles;
         for (const f of FACES) {
-          // Hidden-face culling: only emit faces exposed to air.
-          if (world.get(x + f.dir[0], y + f.dir[1], z + f.dir[2]) !== BlockType.Air) continue;
+          // Hidden-face culling: emit faces exposed to air. Beds count as air
+          // here so blocks placed against the treasure still render a face.
+          const nb = world.get(x + f.dir[0], y + f.dir[1], z + f.dir[2]);
+          if (nb !== BlockType.Air && !isBed(nb)) continue;
 
           // Tangent axes for this face (for per-vertex ambient occlusion).
           let a1: number;
@@ -138,6 +144,8 @@ export class WorldRenderer {
     } else {
       mesh = new THREE.Mesh(geo, this.material);
       mesh.matrixAutoUpdate = false;
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
       this.scene.add(mesh);
       this.meshes.set(key, mesh);
     }

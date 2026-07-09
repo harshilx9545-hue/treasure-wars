@@ -4,6 +4,8 @@ import {
   MOVE_SPEED,
   SPRINT_MULT,
   MAX_STEP_DT,
+  GROUND_ACCEL,
+  AIR_ACCEL,
   PLAYER_HALF_W,
   PLAYER_HEIGHT,
 } from './constants';
@@ -14,6 +16,8 @@ export interface PlayerPhysics {
   x: number; // feet center
   y: number;
   z: number;
+  vx: number; // horizontal velocity (drives smooth accel/decel + knockback)
+  vz: number;
   vy: number;
   onGround: boolean;
 }
@@ -26,6 +30,12 @@ export interface MoveInput {
   jump: boolean;
   sprint: boolean;
   yaw: number;
+}
+
+/** Optional per-step modifiers (power-ups). Defaults are neutral. */
+export interface StepMods {
+  speedMult?: number;
+  jumpMult?: number;
 }
 
 const EPS = 1e-4;
@@ -51,10 +61,16 @@ function boxCollides(isSolid: IsSolidFn, x: number, y: number, z: number): boole
 /**
  * Deterministic axis-separated AABB step. Runs on the client for prediction
  * and on the server for authority — identical results for identical inputs.
+ *
+ * Horizontal motion now uses smooth exponential acceleration toward the
+ * desired velocity, which also gives knockback a natural decay.
  */
-export function stepPlayer(p: PlayerPhysics, input: MoveInput, isSolid: IsSolidFn): void {
+export function stepPlayer(p: PlayerPhysics, input: MoveInput, isSolid: IsSolidFn, mods?: StepMods): void {
   const dt = Math.min(Math.max(input.dt, 0), MAX_STEP_DT);
   if (dt === 0) return;
+
+  const speedMult = mods?.speedMult ?? 1;
+  const jumpMult = mods?.jumpMult ?? 1;
 
   let mx = input.moveX;
   let mz = input.moveZ;
@@ -64,26 +80,39 @@ export function stepPlayer(p: PlayerPhysics, input: MoveInput, isSolid: IsSolidF
     mz /= len;
   }
   // Sprint only applies while moving forward (Minecraft rule).
-  const speed = MOVE_SPEED * (input.sprint && input.moveZ > 0 ? SPRINT_MULT : 1);
+  const speed = MOVE_SPEED * speedMult * (input.sprint && input.moveZ > 0 ? SPRINT_MULT : 1);
   const sin = Math.sin(input.yaw);
   const cos = Math.cos(input.yaw);
-  const vx = (mx * cos - mz * sin) * speed;
-  const vz = (-mz * cos - mx * sin) * speed;
+  const targetVx = (mx * cos - mz * sin) * speed;
+  const targetVz = (-mz * cos - mx * sin) * speed;
+
+  // Smooth accel/decel: approach the target velocity. Ground has strong
+  // control; air keeps most momentum so knockback and jumps feel floaty.
+  const rate = p.onGround ? GROUND_ACCEL : AIR_ACCEL;
+  const k = 1 - Math.exp(-rate * dt);
+  p.vx += (targetVx - p.vx) * k;
+  p.vz += (targetVz - p.vz) * k;
 
   if (input.jump && p.onGround) {
-    p.vy = JUMP_VELOCITY;
+    p.vy = JUMP_VELOCITY * jumpMult;
     p.onGround = false;
   }
   p.vy += GRAVITY * dt;
 
   // X
-  let nx = p.x + vx * dt;
-  if (boxCollides(isSolid, nx, p.y, p.z)) nx = p.x;
+  let nx = p.x + p.vx * dt;
+  if (boxCollides(isSolid, nx, p.y, p.z)) {
+    nx = p.x;
+    p.vx = 0;
+  }
   p.x = nx;
 
   // Z
-  let nz = p.z + vz * dt;
-  if (boxCollides(isSolid, p.x, p.y, nz)) nz = p.z;
+  let nz = p.z + p.vz * dt;
+  if (boxCollides(isSolid, p.x, p.y, nz)) {
+    nz = p.z;
+    p.vz = 0;
+  }
   p.z = nz;
 
   // Y
