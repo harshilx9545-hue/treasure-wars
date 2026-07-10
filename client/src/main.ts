@@ -57,6 +57,7 @@ import { Shop } from './shop';
 import { EntityRenderer } from './entities';
 import { Treasure } from './treasure';
 import { EndScreen } from './endscreen';
+import { Objective } from './objective';
 import { Environment } from './environment';
 
 const app = document.getElementById('app')!;
@@ -129,6 +130,7 @@ const menu = new Menu();
 const entities = new EntityRenderer(scene);
 const shop = new Shop();
 const endScreen = new EndScreen();
+const objective = new Objective();
 endScreen.onPlayAgain = () => { playAgainRequested = true; room?.send(Msg.Rematch, {}); };
 endScreen.onReturnLobby = () => { playAgainRequested = false; room?.send(Msg.Rematch, {}); };
 
@@ -667,6 +669,7 @@ function attachRoomHandlers(r: Room): void {
     hotbarOwnedSig = ''; hotbarSig = '';
     localEffects.clear(); powerCooldownUntil.clear();
     endScreen.hide();
+    objective.reset();
     menu.hide();
     if (document.pointerLockElement) document.exitPointerLock();
     lobby.resurface();
@@ -725,6 +728,10 @@ function frame(now: number): void {
   const play = canPlay();
   const phaseNow = offline ? 'playing' : ((room?.state as any)?.phase ?? 'lobby');
   const ended = !offline && started && phaseNow === 'ended';
+
+  // Cinematic objective popup: fire once the player is actually in the match
+  // (past the click-to-play splash). Purely visual — never pauses the game.
+  if (play && !ended && !menu.visible) objective.play();
   let me: any = null;
   const players = room ? (room.state as any)?.players : null;
 
@@ -951,6 +958,12 @@ function frame(now: number): void {
         name: t.name, color: `#${t.color.toString(16).padStart(6, '0')}`,
         treasureAlive: ((bedsAlive >> i) & 1) === 1, alive: alive[i], kills: teamKills[i], you: i === myTeam,
       })));
+
+      // Objective tracker: my treasure standing + how many enemy treasures remain.
+      const myTreasureAlive = ((bedsAlive >> myTeam) & 1) === 1;
+      let enemyTreasuresLeft = 0;
+      for (let i = 0; i < TEAMS.length; i++) if (i !== myTeam && ((bedsAlive >> i) & 1) === 1) enemyTreasuresLeft++;
+      objective.setProgress(myTreasureAlive, enemyTreasuresLeft);
     }
 
     // Death / respawn countdown (win/lose is shown on the end screen).
@@ -960,7 +973,7 @@ function frame(now: number): void {
     } else if (me && !alive) {
       const bedAlive = ((((room?.state as any)?.bedsAlive ?? 0b1111) >> me.team) & 1) === 1;
       if (bedAlive) { const left = Math.max(0, Math.ceil(RESPAWN_SECONDS - (now - deadSince) / 1000)); hud.setStatus(`You died! Respawning in ${left}...`); }
-      else hud.setStatus('ELIMINATED — your bed was destroyed');
+      else hud.setStatus('ELIMINATED — your Treasure was destroyed');
     } else hud.setStatus('');
   } else if (ended) {
     // Match over: freeze the scene (camera stays put), let avatars settle to

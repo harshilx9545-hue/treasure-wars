@@ -286,6 +286,62 @@
     .end-btns { display: flex; gap: 12px; justify-content: center; margin-top: 6px; }
     .end-btns .mc-btn { flex: 1; animation: endcard .5s .15s backwards; }
 
+    /* --- Objective popup (cinematic match-start) --- */
+    /* Whole layer never blocks input: player keeps moving, no pause. */
+    #objective-popup { position: fixed; inset: 0; z-index: 65; display: none;
+      align-items: center; justify-content: center; pointer-events: none; }
+    #objective-popup.on { display: flex; }
+    .obj-overlay { position: absolute; inset: 0; background: radial-gradient(circle at 50% 42%, rgba(10,16,30,.55), rgba(0,0,0,.8));
+      opacity: 0; transition: opacity .45s ease; }
+    #objective-popup.show .obj-overlay { opacity: 1; }
+    .obj-panel { position: relative; width: min(90vw, 560px); padding: clamp(20px, 5vw, 40px) clamp(18px, 5vw, 44px);
+      text-align: center; border-radius: 18px; opacity: 0;
+      transform: translateY(22px) scale(.9); transition: opacity .5s ease, transform .5s cubic-bezier(.2,.9,.3,1.15);
+      will-change: opacity, transform;
+      /* Wooden pirate parchment panel */
+      background:
+        linear-gradient(180deg, rgba(247,230,193,.97), rgba(222,196,142,.97)) padding-box,
+        linear-gradient(180deg, #6b4a24, #3f2a12) border-box;
+      border: 6px solid transparent;
+      box-shadow: 0 24px 70px rgba(0,0,0,.6), inset 0 0 40px rgba(120,80,30,.35); }
+    #objective-popup.show .obj-panel { opacity: 1; transform: translateY(0) scale(1); }
+    /* Small glow behind the title */
+    .obj-glow { position: absolute; left: 50%; top: clamp(30px, 8vw, 58px); width: 78%; height: 90px;
+      transform: translateX(-50%); pointer-events: none; border-radius: 50%;
+      background: radial-gradient(ellipse at center, rgba(255,210,63,.55), rgba(255,210,63,0) 70%);
+      filter: blur(6px); animation: objGlow 2.4s ease-in-out infinite; }
+    @keyframes objGlow { 0%,100% { opacity: .55; } 50% { opacity: 1; } }
+    .obj-title { position: relative; font-weight: 900; letter-spacing: clamp(2px, 1vw, 5px);
+      font-size: clamp(26px, 7vw, 50px); color: var(--gold);
+      text-shadow: 0 2px 0 #7a4a10, 0 4px 0 rgba(0,0,0,.35), 0 0 18px rgba(255,210,63,.5); }
+    .obj-sub { position: relative; margin-top: 8px; font-weight: 800; letter-spacing: clamp(3px, 1.5vw, 7px);
+      font-size: clamp(13px, 2.4vw, 17px); color: #6b3f16; text-transform: uppercase; }
+    .obj-sub::before, .obj-sub::after { content: '\2015'; opacity: .5; margin: 0 8px; }
+    .obj-lines { position: relative; margin-top: 14px; display: flex; flex-direction: column; gap: 7px;
+      color: #4a2f12; font-weight: 700; font-size: clamp(13px, 2.6vw, 18px); line-height: 1.35;
+      text-shadow: 0 1px 0 rgba(255,255,255,.35); }
+
+    /* --- Objective tracker (top-right, persistent during match) --- */
+    #objective-tracker { position: fixed; top: 128px; right: 10px; width: 236px; display: none;
+      background: var(--panel); border: 1px solid rgba(255,210,63,.4); border-radius: 12px;
+      padding: 9px 12px; font-size: 13px; pointer-events: none; backdrop-filter: blur(8px);
+      box-shadow: 0 8px 26px rgba(0,0,0,.4); opacity: 0; transform: translateY(-6px);
+      transition: opacity .4s ease, transform .4s ease; }
+    #objective-tracker.on { display: block; }
+    #objective-tracker.show { opacity: 1; transform: none; }
+    .obj-track-title { text-align: center; font-weight: 900; letter-spacing: 2px; color: var(--gold);
+      font-size: 12px; text-shadow: 0 2px 3px #000; margin-bottom: 6px; }
+    .obj-track-row { display: flex; align-items: center; gap: 8px; padding: 3px 2px; line-height: 1.25;
+      text-shadow: 0 1px 2px #000; }
+    .obj-track-row .obj-box { flex: none; width: 16px; text-align: center; font-weight: 900; }
+    .obj-track-row.done { color: #7CFC7C; } .obj-track-row.done .obj-box { color: #7CFC7C; }
+    .obj-track-row.fail { color: #ff6b6b; } .obj-track-row.fail .obj-box { color: #ff6b6b; }
+
+    @media (prefers-reduced-motion: reduce) {
+      .obj-overlay, .obj-panel, #objective-tracker { transition-duration: .01ms; }
+      .obj-glow { animation: none; }
+    }
+
     /* --- Confetti / party poppers --- */
     .confetti { position: absolute; inset: 0; z-index: 1; pointer-events: none; overflow: hidden; }
     .conf { position: absolute; top: -14px; width: 10px; height: 16px; opacity: 0;
@@ -317,6 +373,20 @@
   <div id="shopHint">Press <b>E</b> to open Shop</div>
   <div id="hotbar"></div>
   <div id="notice"></div>
+  <div id="objective-tracker"></div>
+  <div id="objective-popup">
+    <div class="obj-overlay"></div>
+    <div class="obj-panel">
+      <div class="obj-glow"></div>
+      <div class="obj-title">&#127988;&#8205;&#9760;&#65039; TREASURE WARS</div>
+      <div class="obj-sub">OBJECTIVE</div>
+      <div class="obj-lines">
+        <span>Protect your Treasure.</span>
+        <span>Destroy every enemy Treasure.</span>
+        <span>Eliminate all enemy pirates to claim victory!</span>
+      </div>
+    </div>
+  </div>
   <script type="module" src="/src/main.ts"></script>
 </body>
 </html>

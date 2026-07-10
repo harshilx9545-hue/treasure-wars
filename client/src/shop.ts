@@ -94,7 +94,7 @@ export class Shop {
         const w = ECONOMY.blocks.wool, pl = ECONOMY.blocks.plank, st = ECONOMY.blocks.stone;
         const stoneLocked = (me.coinsEarned ?? 0) < st.unlockCoinsEarned;
         return [
-          { name: `Wool x${w.stack}`, desc: 'Team-colored. Bed defense & bridging.', price: w.price * w.stack, id: 'block_wool', color: TEAMS[me.team].color },
+          { name: `Wool x${w.stack}`, desc: 'Team-colored. Treasure defense & bridging.', price: w.price * w.stack, id: 'block_wool', color: TEAMS[me.team].color },
           { name: `Wood Plank x${pl.stack}`, desc: 'Cheaper, but breaks faster.', price: pl.price * pl.stack, id: 'block_plank', color: 0xc08a4a },
           { name: `Stone x${st.stack}`, desc: stoneLocked ? `Unlocks after earning ${st.unlockCoinsEarned} coins` : 'Durable defensive block.', price: st.price * st.stack, id: 'block_stone', color: 0x9a9a9a, disabled: stoneLocked, note: stoneLocked ? 'LOCKED' : undefined },
         ];

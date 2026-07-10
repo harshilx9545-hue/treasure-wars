@@ -241,7 +241,7 @@ export class GameRoom extends Room<BedwarsState> {
       p.blocking = false;
       this.respawn(id);
     });
-    this.feed('The match has begun! Defend your bed.');
+    this.feed('The match has begun! Defend your Treasure.');
     this.updateMetadata();
   }
 
@@ -934,7 +934,7 @@ export class GameRoom extends Room<BedwarsState> {
       }
       this.state.bedsAlive &= ~(1 << bt);
       this.broadcast(Msg.BedDestroyed, { team: bt, by: p.team, x, y, z });
-      this.feed(`${TEAMS[bt].name} bed was destroyed by ${p.name}! They can no longer respawn.`);
+      this.feed(`${TEAMS[bt].name} Treasure was destroyed by ${p.name}! They can no longer respawn.`);
       this.checkWin();
       return;
     }
