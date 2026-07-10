@@ -178,6 +178,16 @@ export class GameRoom extends Room<BedwarsState> {
     this.lastDamage.delete(client.sessionId);
     this.assistDamage.delete(client.sessionId);
 
+    // If this was the last connected client (with no incoming seat
+    // reservations), destroy the room immediately. Colyseus' auto-dispose is
+    // blocked by the pending seat-reservation timer for up to ~15s after the
+    // room is created, which would otherwise leave an empty "ghost" lobby
+    // visible in getAvailableRooms(). disconnect() emits 'dispose' right away.
+    if (this.clients.length === 0 && Object.keys(this.reservedSeats).length === 0) {
+      this.disconnect().catch(() => {});
+      return;
+    }
+
     if (wasHost) this.handleHostLeft();
     this.updateMetadata();
     this.checkWin();
