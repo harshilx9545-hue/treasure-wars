@@ -15,8 +15,8 @@
     "dev:client": "npm --workspace @bedwars/client run dev",
     "build": "npm --workspace @bedwars/client run build",
     "build:client": "npm --workspace @bedwars/client run build",
-    "start": "serve -s client/dist",
-    "start:client": "serve -s client/dist",
+    "start": "serve -s client/dist -l tcp://0.0.0.0:${PORT:-3000}",
+    "start:client": "serve -s client/dist -l tcp://0.0.0.0:${PORT:-3000}",
     "start:server": "npm --workspace @bedwars/server run start"
   },
   "dependencies": {
