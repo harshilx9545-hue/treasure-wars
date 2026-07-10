@@ -6,7 +6,7 @@ export const TICK_MS = 1000 / TICK_RATE;
 export const GRAVITY = -28;
 export const JUMP_VELOCITY = 9.2;
 export const BASE_MOVE_SPEED = 4.32; // reference MC walk ~4.32 m/s
-export const MOVE_SPEED = BASE_MOVE_SPEED * 5; // ~5x faster movement
+export const MOVE_SPEED = BASE_MOVE_SPEED * 2.5; // ~2.5x (halved from 5x)
 export const SPRINT_MULT = 1.3; // sprint on top of the boosted base
 export const MAX_STEP_DT = 0.05; // clamp per-input integration step
 
