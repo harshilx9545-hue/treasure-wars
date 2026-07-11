@@ -12,6 +12,27 @@ const WALK_SPEED = 0.7;
 const WEAPON_BONE = 'Weapon.R';
 const BUILTIN_WEAPON_MESH = 'Warrior_Sword';
 
+/**
+ * Resolve a node by its authored glTF name. three.js's GLTFLoader runs every
+ * node name through PropertyBinding.sanitizeNodeName, which strips reserved
+ * characters ("[ ] . : /") — so a bone authored as "Weapon.R" is loaded into
+ * the scene graph as "WeaponR" (the original is kept only in userData.name).
+ * We therefore match against the sanitized name first (what getObjectByName
+ * actually sees), then fall back to the raw name and a userData.name scan so
+ * the lookup is robust across models and future three.js versions.
+ */
+function findNode(root: THREE.Object3D, authoredName: string): THREE.Object3D | null {
+  const sanitized = THREE.PropertyBinding.sanitizeNodeName(authoredName);
+  const direct = root.getObjectByName(sanitized) ?? root.getObjectByName(authoredName);
+  if (direct) return direct;
+  let match: THREE.Object3D | null = null;
+  root.traverse((o) => {
+    if (match) return;
+    if (o.userData?.name === authoredName || o.name === sanitized || o.name === authoredName) match = o;
+  });
+  return match;
+}
+
 export interface RemotePos {
   id: string;
   x: number;
@@ -137,7 +158,7 @@ export class RemotePlayers {
       };
       mesh.material = Array.isArray(src) ? src.map(tint) : tint(src);
     });
-    e.bone = model.getObjectByName(WEAPON_BONE) ?? null;
+    e.bone = findNode(model, WEAPON_BONE);
 
     const root = new THREE.Group();
     root.add(model);
