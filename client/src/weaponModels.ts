@@ -21,6 +21,7 @@ const HAND_TARGET = 0.6; // normalized max-dimension for held (3rd person) weapo
 interface Template {
   scene: THREE.Object3D;
   maxDim: number;
+  longAxis: 'x' | 'y' | 'z'; // model's longest local axis (the "length")
 }
 
 /**
@@ -52,7 +53,8 @@ class WeaponModels {
         const box = new THREE.Box3().setFromObject(scene);
         const size = new THREE.Vector3(); box.getSize(size);
         const maxDim = Math.max(size.x, size.y, size.z) || 1;
-        const tpl = { scene, maxDim };
+        const longAxis: 'x' | 'y' | 'z' = size.x >= size.y && size.x >= size.z ? 'x' : size.y >= size.z ? 'y' : 'z';
+        const tpl = { scene, maxDim, longAxis };
         this.templates.set(file, tpl);
         if (file === ARROW.glb) this.arrowTpl = tpl;
         done();
@@ -73,7 +75,11 @@ class WeaponModels {
     const def = WEAPONS[id];
     const tpl = this.templates.get(def.glb);
     if (!def || !tpl) return null;
-    return this.wrap(tpl, def, FP_TARGET, def.fp);
+    // Spear reads as a real combat spear: stretch its length ~30-40%, scaled by
+    // attack range (longer reach -> longer spear). Purely visual; combat/reach
+    // are unchanged. Other weapons keep uniform scale (lengthScale = 1).
+    const lengthScale = id === WeaponId.Spear ? 1 + Math.max(0, def.range - 3.0) * 0.28 : 1;
+    return this.wrap(tpl, def, FP_TARGET, def.fp, lengthScale);
   }
 
   /** Held weapon model for a remote player's hand bone. */
@@ -93,11 +99,16 @@ class WeaponModels {
     return pivot;
   }
 
-  private wrap(tpl: Template, def: WeaponDef, target: number, t: { scale: number; pos: [number, number, number]; rot: [number, number, number] }): THREE.Object3D {
+  private wrap(tpl: Template, def: WeaponDef, target: number, t: { scale: number; pos: [number, number, number]; rot: [number, number, number] }, lengthScale = 1): THREE.Object3D {
     const pivot = new THREE.Group();
     const model = this.clone(tpl);
     const s = (target / tpl.maxDim) * t.scale;
-    model.scale.setScalar(s);
+    // Non-uniform scale stretches only the model's longest axis (its length).
+    model.scale.set(
+      s * (tpl.longAxis === 'x' ? lengthScale : 1),
+      s * (tpl.longAxis === 'y' ? lengthScale : 1),
+      s * (tpl.longAxis === 'z' ? lengthScale : 1),
+    );
     model.position.set(t.pos[0], t.pos[1], t.pos[2]);
     model.rotation.set(t.rot[0], t.rot[1], t.rot[2]);
     pivot.add(model);

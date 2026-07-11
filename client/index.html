@@ -296,7 +296,8 @@
     #objective-popup.show .obj-overlay { opacity: 1; }
     .obj-panel { position: relative; width: min(90vw, 560px); padding: clamp(20px, 5vw, 40px) clamp(18px, 5vw, 44px);
       text-align: center; border-radius: 18px; opacity: 0;
-      transform: translateY(22px) scale(.9); transition: opacity .5s ease, transform .5s cubic-bezier(.2,.9,.3,1.15);
+      transform: translateY(22px) scale(.9);
+      transition: opacity .4s ease, transform .5s cubic-bezier(.34, 1.56, .64, 1); /* small overshoot bounce */
       will-change: opacity, transform;
       /* Wooden pirate parchment panel */
       background:
@@ -383,7 +384,7 @@
       <div class="obj-lines">
         <span>Protect your Treasure.</span>
         <span>Destroy every enemy Treasure.</span>
-        <span>Eliminate all enemy pirates to claim victory!</span>
+        <span>Eliminate all enemy pirates to win!</span>
       </div>
     </div>
   </div>

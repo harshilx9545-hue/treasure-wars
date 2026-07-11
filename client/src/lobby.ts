@@ -301,12 +301,12 @@ export class Lobby {
   private showExit(): void {
     const pop = document.createElement('div');
     pop.className = 'pirate-popup-scrim';
-    pop.innerHTML = `<div class="pirate-popup"><div class="pp-title">Abandon Ship?</div><div class="pp-body">Are you sure you want to exit Treasure Wars?</div></div>`;
+    pop.innerHTML = `<div class="pirate-popup"><div class="pp-title">EXIT GAME?</div><div class="pp-body">Are you sure you want to quit?</div></div>`;
     const box = pop.querySelector('.pirate-popup')!;
     const btns = document.createElement('div'); btns.className = 'pp-btns';
     btns.append(
-      this.pbtn('\u2714', 'Yes', () => { pop.remove(); this.doExit(); }, 'danger compact'),
-      this.pbtn('\u2716', 'No', () => { audio.play('click'); pop.remove(); }, 'ghost compact'),
+      this.pbtn('\u2714', 'YES', () => { pop.remove(); this.doExit(); }, 'primary compact'),
+      this.pbtn('\u2716', 'NO', () => { audio.play('click'); pop.remove(); }, 'danger compact'),
     );
     box.append(btns);
     pop.addEventListener('mousedown', (e) => { if (e.target === pop) pop.remove(); });
