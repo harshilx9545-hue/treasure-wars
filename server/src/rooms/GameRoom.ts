@@ -27,7 +27,6 @@ import {
   ECONOMY,
   WEAPONS,
   WeaponId,
-  ARROW,
   STARTING_WEAPONS,
   type SpawnPoint,
   type MoveInput,
@@ -38,7 +37,6 @@ import {
   type PowerUpMessage,
   type PurchaseMessage,
   type UseItemMessage,
-  type ShootMessage,
   type BlockDiff,
   type StepMods,
 } from '@bedwars/shared';
@@ -123,7 +121,6 @@ export class GameRoom extends Room<BedwarsState> {
       const p = this.state.players.get(client.sessionId);
       if (p) p.blocking = !!m?.blocking && p.weapon === WeaponId.Shield;
     });
-    this.onMessage(Msg.Shoot, (client, m: ShootMessage) => this.tryShoot(client, m));
     this.onMessage(Msg.Unstuck, (client) => this.unstuck(client));
     this.onMessage(Msg.Rematch, () => this.tryRematch());
     this.onMessage(Msg.SetDuration, (client, m: { minutes?: number }) => {
@@ -237,7 +234,6 @@ export class GameRoom extends Room<BedwarsState> {
       for (const w of STARTING_WEAPONS) owned |= (1 << w);
       p.weapons = owned;
       p.weapon = STARTING_WEAPONS[0] ?? WeaponId.IronSword;
-      p.arrows = 0;
       p.blocking = false;
       this.respawn(id);
     });
@@ -312,7 +308,7 @@ export class GameRoom extends Room<BedwarsState> {
       p.wool = 0; p.plank = 0; p.stone = 0;
       p.pickTier = 0; p.shears = false;
       p.tnt = 0; p.pearls = 0; p.fireballs = 0; p.alarms = 0;
-      p.weapons = 1 << WeaponId.IronSword; p.weapon = WeaponId.IronSword; p.arrows = 0; p.blocking = false;
+      p.weapons = 1 << WeaponId.IronSword; p.weapon = WeaponId.IronSword; p.blocking = false;
       p.kills = 0; p.deaths = 0; p.assists = 0;
       p.effects.clear();
       const phys = this.phys.get(id);
@@ -466,14 +462,9 @@ export class GameRoom extends Room<BedwarsState> {
       }
       case 'weapon_axe': this.buyWeapon(client, p, WeaponId.Axe, charge, notice); break;
       case 'weapon_pickaxe': this.buyWeapon(client, p, WeaponId.Pickaxe, charge, notice); break;
-      case 'weapon_bow': this.buyWeapon(client, p, WeaponId.Bow, charge, notice); break;
       case 'weapon_spear': this.buyWeapon(client, p, WeaponId.Spear, charge, notice); break;
       case 'weapon_shield': this.buyWeapon(client, p, WeaponId.Shield, charge, notice); break;
       case 'weapon_doubleaxe': this.buyWeapon(client, p, WeaponId.DoubleAxe, charge, notice); break;
-      case 'arrows': {
-        if (!charge(ARROW.price)) return;
-        p.arrows += ARROW.bundle; notice(`+${ARROW.bundle} Arrows`, true); break;
-      }
       case 'armor': {
         const next = team.armorTier + 1;
         if (next >= ECONOMY.armor.length) { notice('Max armor tier', false); return; }
@@ -599,7 +590,7 @@ export class GameRoom extends Room<BedwarsState> {
       const meta = this.projMeta.get(key);
       if (!meta) { remove.push(key); return; }
       meta.ttl -= dt;
-      if (meta.kind === 1 || meta.kind === 2) meta.vy -= (meta.kind === 2 ? 9 : 12) * dt; // fireball/arrow gravity
+      if (meta.kind === 1) meta.vy -= 12 * dt; // fireball gravity
 
       // Substep to avoid tunneling through thin walls.
       const steps = 6;
@@ -620,13 +611,6 @@ export class GameRoom extends Room<BedwarsState> {
         if (hitPlayer) { landed = true; }
       }
 
-      // Arrows deal damage on a direct player hit at any point in flight.
-      if (meta.kind === 2 && hitPlayer) {
-        this.applyMeleeDamage(meta.owner, hitPlayer, meta.damage ?? ARROW.damageMin, 0.9, false);
-        remove.push(key);
-        return;
-      }
-
       if (landed || meta.ttl <= 0) {
         if (meta.kind === 0) {
           // Ender pearl: teleport owner to the landing spot.
@@ -642,7 +626,6 @@ export class GameRoom extends Room<BedwarsState> {
           const f = ECONOMY.utility.fireball;
           this.explode(proj.x, proj.y, proj.z, f.radius, f.damage, f.knockback, meta.owner, meta.team, 'fireball');
         }
-        // kind 2 (arrow) that landed without hitting a player: just disappears.
         remove.push(key);
       }
     });
@@ -954,7 +937,6 @@ export class GameRoom extends Room<BedwarsState> {
     // Active weapon governs damage / cooldown / range / knockback.
     const weapon = WEAPONS[attacker.weapon as WeaponId] ?? WEAPONS[WeaponId.IronSword];
     if (weapon.shield || attacker.blocking) return; // can't attack while shielding
-    if (weapon.ranged) return; // bow attacks via Shoot, not melee
 
     const now = Date.now();
     const last = this.lastAttack.get(client.sessionId) ?? 0;
@@ -1019,38 +1001,6 @@ export class GameRoom extends Room<BedwarsState> {
     if (!((p.weapons >> w) & 1)) return; // must own it
     p.weapon = w;
     if (w !== WeaponId.Shield) p.blocking = false;
-  }
-
-  private tryShoot(client: Client, m: ShootMessage): void {
-    if (this.state.phase !== 'playing') return;
-    const p = this.state.players.get(client.sessionId);
-    const phys = this.phys.get(client.sessionId);
-    if (!p?.alive || !phys) return;
-    if (p.weapon !== WeaponId.Bow) return;
-    if (p.arrows <= 0) { client.send(Msg.Notice, { text: 'Out of arrows', ok: false }); return; }
-    const now = Date.now();
-    const last = this.lastAttack.get(client.sessionId) ?? 0;
-    if (now - last < WEAPONS[WeaponId.Bow].cooldownMs) return;
-    this.lastAttack.set(client.sessionId, now);
-
-    p.arrows -= 1;
-    const charge = Math.max(0, Math.min(1, m?.charge ?? 0));
-    const len = Math.hypot(m.dx, m.dy, m.dz) || 1;
-    const speed = ARROW.speedMin + (ARROW.speedMax - ARROW.speedMin) * charge;
-    const dir = { x: m.dx / len, y: m.dy / len, z: m.dz / len };
-    const proj = new Projectile();
-    proj.x = phys.x + dir.x * 0.8;
-    proj.y = phys.y + PLAYER_EYE + dir.y * 0.8;
-    proj.z = phys.z + dir.z * 0.8;
-    proj.kind = 2; // arrow
-    proj.team = p.team;
-    const key = `a${this.idCounter++}`;
-    this.state.projectiles.set(key, proj);
-    this.projMeta.set(key, {
-      vx: dir.x * speed, vy: dir.y * speed, vz: dir.z * speed,
-      owner: client.sessionId, team: p.team, ttl: ARROW.ttlMs / 1000, kind: 2,
-      damage: ARROW.damageMin + (ARROW.damageMax - ARROW.damageMin) * charge,
-    });
   }
 
   private tryPowerUp(client: Client, m: PowerUpMessage): void {

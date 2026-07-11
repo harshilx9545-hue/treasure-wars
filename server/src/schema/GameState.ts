@@ -35,7 +35,6 @@ export class PlayerState extends Schema {
   // Weapon system
   @type('uint8') weapon = 0; // active WeaponId (0 = Iron Sword)
   @type('uint8') weapons = 1; // owned bitmask (bit 0 = Iron Sword)
-  @type('uint16') arrows = 0; // bow ammunition
   @type('boolean') blocking = false; // shield raised
   @type('uint8') tnt = 0;
   @type('uint8') pearls = 0;

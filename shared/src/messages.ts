@@ -28,7 +28,6 @@ export const Msg = {
   // Weapons
   Weapon: 'wp', // client -> server: { weapon } select active weapon
   Block: 'bl', // client -> server: { blocking } shield raise/lower
-  Shoot: 'so', // client -> server: ShootMessage (bow)
   // Match flow
   Unstuck: 'un', // client -> server: safe respawn at team spawn (anti-stuck)
   Rematch: 'rm', // client -> server: reset a finished match back to the lobby
@@ -132,11 +131,4 @@ export interface TeleportEvent {
   x: number;
   y: number;
   z: number;
-}
-
-export interface ShootMessage {
-  dx: number;
-  dy: number;
-  dz: number;
-  charge: number; // 0..1 draw strength
 }

@@ -1,11 +1,10 @@
-import { ECONOMY, TEAMS, WEAPONS, WeaponId, ARROW, type ShopItemId } from '@bedwars/shared';
+import { ECONOMY, TEAMS, WEAPONS, WeaponId, type ShopItemId } from '@bedwars/shared';
 import { audio } from './audio';
 
 /** Maps a buyable weapon to its shop purchase id (server + offline both handle these). */
 const WEAPON_SHOP_ID: Partial<Record<WeaponId, ShopItemId>> = {
   [WeaponId.Axe]: 'weapon_axe',
   [WeaponId.Pickaxe]: 'weapon_pickaxe',
-  [WeaponId.Bow]: 'weapon_bow',
   [WeaponId.Spear]: 'weapon_spear',
   [WeaponId.Shield]: 'weapon_shield',
   [WeaponId.DoubleAxe]: 'weapon_doubleaxe',
@@ -15,7 +14,6 @@ function weaponDesc(id: WeaponId): string {
   const w = WEAPONS[id];
   const aps = (1000 / w.cooldownMs).toFixed(1);
   if (w.shield) return `Blocks melee & knockback. Slows you while raised.`;
-  if (w.ranged) return `Fires arrows. Charge for more damage & range. (needs Arrows)`;
   return `Dmg ${w.damage} · ${aps} hits/s · range ${w.range.toFixed(1)}${w.breakMult > 1.2 ? ` · mines x${w.breakMult}` : ''}`;
 }
 
@@ -113,8 +111,6 @@ export class Shop {
             color: def.color, disabled: has, note: has ? 'OWNED' : undefined,
           });
         }
-        // Arrows for the bow.
-        rows.push({ name: `Arrows x${ARROW.bundle} (${me.arrows ?? 0})`, desc: 'Ammunition for the Bow.', price: ARROW.price, id: 'arrows', color: 0xcccccc });
         return rows;
       }
       case 'Armor': {

@@ -102,11 +102,9 @@ export type ShopItemId =
   // Weapons (WeaponId-based system; each is a one-time unlock)
   | 'weapon_axe'
   | 'weapon_pickaxe'
-  | 'weapon_bow'
   | 'weapon_spear'
   | 'weapon_shield'
   | 'weapon_doubleaxe'
-  | 'arrows' // bow ammunition bundle
   | 'sword' // legacy sword-tier upgrade (kept for compatibility)
   | 'armor' // buys next armor tier (team)
   | 'pick' // buys next pickaxe tier

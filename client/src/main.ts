@@ -25,7 +25,6 @@ import {
   ECONOMY,
   WEAPONS,
   WeaponId,
-  ARROW,
   isBed,
   type MoveInput,
   type PlayerPhysics,
@@ -171,9 +170,6 @@ let offlineDeadUntil = 0;
 let placeCooldown = 0;
 const PLACE_COOLDOWN = 0.16; // seconds between placements while holding RMB (Minecraft-like)
 let blocking = false; // shield raised
-let bowCharging = false;
-let bowStart = 0;
-let bowCharge = 0;
 const pending: MoveInput[] = [];
 let batch: MoveInput[] = [];
 let sendTimer = 0;
@@ -199,7 +195,7 @@ const localMe: any = {
   wool: 0, plank: 0, stone: 0,
   swordTier: 0, pickTier: 0, shears: false,
   tnt: 0, pearls: 0, fireballs: 0, alarms: 0,
-  weapon: WeaponId.IronSword, weapons: 1 << WeaponId.IronSword, arrows: 0, blocking: false,
+  weapon: WeaponId.IronSword, weapons: 1 << WeaponId.IronSword, blocking: false,
   effects: new Map<string, number>(),
 };
 const localTeam = { armorTier: 0, genLevel: 0 };
@@ -256,7 +252,7 @@ function rebuildHotbar(me: any): void {
 }
 
 function slotCount(slot: Slot, me: any): number {
-  if (slot.kind === 'weapon') return slot.weapon === WeaponId.Bow ? (me?.arrows ?? 0) : -1;
+  if (slot.kind === 'weapon') return -1;
   if (slot.kind === 'block') return me ? (me[slot.invField!] ?? 0) : 0;
   return me ? (me[UTIL_COUNT[slot.util!]] ?? 0) : 0;
 }
@@ -271,7 +267,6 @@ function renderHotbar(me: any): void {
     let count = '';
     if (s.kind === 'weapon') {
       swatch = `<div class="swatch" style="background:#${(s.color ?? 0xcccccc).toString(16).padStart(6, '0')}">\u2694</div>`;
-      if (s.weapon === WeaponId.Bow) count = `<span class="slot-count">${me?.arrows ?? 0}</span>`;
     } else if (s.kind === 'block') {
       swatch = `<div class="swatch" style="background:#${BLOCKS[s.block!].color.toString(16).padStart(6, '0')}"></div>`;
       const c = slotCount(s, me);
@@ -398,11 +393,9 @@ function localBuy(id: string): void {
     }
     case 'weapon_axe': buyWeaponLocal(WeaponId.Axe, charge, notice); break;
     case 'weapon_pickaxe': buyWeaponLocal(WeaponId.Pickaxe, charge, notice); break;
-    case 'weapon_bow': buyWeaponLocal(WeaponId.Bow, charge, notice); break;
     case 'weapon_spear': buyWeaponLocal(WeaponId.Spear, charge, notice); break;
     case 'weapon_shield': buyWeaponLocal(WeaponId.Shield, charge, notice); break;
     case 'weapon_doubleaxe': buyWeaponLocal(WeaponId.DoubleAxe, charge, notice); break;
-    case 'arrows': { if (!charge(ARROW.price)) return; me.arrows += ARROW.bundle; notice(`+${ARROW.bundle} Arrows`, true); break; }
     case 'armor': { const n = team.armorTier + 1; if (n >= ECONOMY.armor.length) { notice('Max armor tier', false); return; } if (!charge(ECONOMY.armor[n].price)) return; team.armorTier = n; notice(`Team armor: ${ECONOMY.armor[n].name}`, true); break; }
     case 'pick': { const n = me.pickTier + 1; if (n >= ECONOMY.pickaxes.length) { notice('Max pickaxe tier', false); return; } if (!charge(ECONOMY.pickaxes[n].price)) return; me.pickTier = n; notice(`Bought ${ECONOMY.pickaxes[n].name}`, true); break; }
     case 'shears': { if (me.shears) { notice('Already own Shears', false); return; } if (!charge(ECONOMY.shears.price)) return; me.shears = true; notice('Bought Shears', true); break; }
@@ -456,8 +449,8 @@ input.onMouseDown = (button) => {
   const wdef = activeWeaponDef();
 
   if (button === 0) {
-    // Melee attack with the active weapon (bows/shields can't melee).
-    if (wdef && (wdef.ranged || wdef.shield)) return;
+    // Melee attack with the active weapon (shields can't melee).
+    if (wdef?.shield) return;
     const targetId = findAttackTarget();
     const crit = !phys.onGround && phys.vy < -0.15;
     viewModel.swing(crit);
@@ -468,8 +461,7 @@ input.onMouseDown = (button) => {
 
   if (button === 2) {
     camera.getWorldDirection(rayDir);
-    // Weapon-specific right-click: bow charge / shield block.
-    if (wdef?.ranged) { bowCharging = true; bowStart = performance.now(); bowCharge = 0; return; }
+    // Weapon-specific right-click: shield block.
     if (wdef?.shield) { setBlocking(true); return; }
 
     const slot = HOTBAR[activeSlot];
@@ -495,24 +487,6 @@ input.onMouseDown = (button) => {
 
 input.onMouseUp = (button) => {
   if (button !== 2) return;
-  // Release bow -> fire arrow with accumulated charge.
-  if (bowCharging) {
-    bowCharging = false;
-    const charge = bowCharge;
-    bowCharge = 0;
-    viewModel.setBowCharge(0);
-    const me = getMe();
-    if ((me?.arrows ?? 0) <= 0) { hud.showNotice('Out of arrows', false); return; }
-    camera.getWorldDirection(rayDir);
-    if (room) room.send(Msg.Shoot, { dx: rayDir.x, dy: rayDir.y, dz: rayDir.z, charge });
-    audio.play('swing');
-    viewModel.releaseBow(); // forward snap + bow recoil
-    // Cosmetic-only release kick, scaled by how long the bow was drawn (does
-    // not affect the networked shot `charge` / damage above).
-    const drawFrac = Math.min(1, (performance.now() - bowStart) / ARROW.chargeMs);
-    shake = Math.max(shake, 0.05 + drawFrac * 0.06);
-    return;
-  }
   // Release shield.
   if (blocking) setBlocking(false);
 };
@@ -639,17 +613,7 @@ function attachRoomHandlers(r: Room): void {
     if (h.crit) particles.crit(h.x, h.y, h.z); else particles.hit(h.x, h.y, h.z);
     if (h.target !== myId) remotes.hitFlash(h.target);
     if (h.by !== myId) remotes.playAttack(h.by); // sync the attacker's swing animation
-    if (h.by === myId) {
-      hud.showHitMarker(h.crit);
-      audio.play(h.crit ? 'crit' : 'hit');
-      // Weighty impact feedback for the attacker: hit-pause, camera shake and a
-      // burst of debris. Heavier weapons hit harder. Purely cosmetic.
-      const w = WEAPONS[(getMe()?.weapon ?? WeaponId.IronSword) as WeaponId];
-      const heavy = w?.id === WeaponId.Axe || w?.id === WeaponId.DoubleAxe;
-      viewModel.impact(heavy);
-      particles.dust(h.x, h.y, h.z, w?.color ?? 0xffffff, heavy ? 14 : 8);
-      shake = Math.max(shake, (heavy ? 0.14 : 0.08) * (h.crit ? 1.3 : 1));
-    }
+    if (h.by === myId) { hud.showHitMarker(h.crit); audio.play(h.crit ? 'crit' : 'hit'); }
     else if (h.target === myId) { audio.play('hit'); hud.flashDamage(); }
     else audio.play('hit');
   });
@@ -962,17 +926,7 @@ function frame(now: number): void {
       if (tryPlaceBlock()) placeCooldown = PLACE_COOLDOWN;
     }
 
-    // Bow draw: drive the view-model draw visual from a local timer. This is
-    // purely cosmetic and never changes the networked shot charge/damage.
-    if (bowCharging) viewModel.setBowCharge(Math.min(1, (now - bowStart) / ARROW.chargeMs));
-
     viewModel.update(dt, moving, sprinting, phys.onGround);
-    // Camera recoil from the active weapon animation (pitch kick, slight roll,
-    // forward lunge for the spear). Applied on top of this frame's view; it is
-    // re-set from input next frame, so it never accumulates or affects aim.
-    const rec = viewModel.getCameraRecoil();
-    if (rec.pitch || rec.roll) { camera.rotation.x -= rec.pitch; camera.rotation.z += rec.roll; }
-    if (rec.fwd > 0) camera.translateZ(-rec.fwd);
     renderHotbar(me);
     // Sync the local view model to the authoritative equipped weapon (e.g.
     // after a purchase auto-equips it, or any server-driven change).
