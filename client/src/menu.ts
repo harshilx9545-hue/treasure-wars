@@ -26,6 +26,7 @@ export class Menu {
   onResume?: () => void;
   onUnstuck?: () => void;
   onCloseSettings?: () => void;
+  onExitMatch?: () => void;
 
   private capturing: BindAction | null = null;
   private captureHandler?: (e: KeyboardEvent) => void;
@@ -88,7 +89,29 @@ export class Menu {
     const unstuck = this.btn('Refresh (Unstuck)', () => { this.onUnstuck?.(); this.onResume?.(); });
     const settingsBtn = this.btn('Settings', () => this.showSettings());
     const fs = this.btn(document.fullscreenElement ? 'Exit Fullscreen' : 'Fullscreen', () => { this.toggleFullscreen(); this.showPause(); });
-    this.card.append(title, resume, unstuck, settingsBtn, fs);
+    // Leave the match entirely — pirate-themed red/gold button at the bottom.
+    const exit = this.btn('EXIT MATCH', () => this.confirmExitMatch(), 'danger exit-match');
+    this.card.append(title, resume, unstuck, settingsBtn, fs, exit);
+  }
+
+  /** Confirmation popup before abandoning the match. */
+  private confirmExitMatch(): void {
+    const scrim = document.createElement('div');
+    scrim.className = 'pirate-popup-scrim';
+    const pop = document.createElement('div');
+    pop.className = 'pirate-popup';
+    pop.innerHTML = '<div class="pp-title">EXIT MATCH?</div>'
+      + '<div class="pp-body">Are you sure you want to leave this match?</div>';
+    const btns = document.createElement('div');
+    btns.className = 'pp-btns';
+    const yes = this.btn('YES', () => { scrim.remove(); this.onExitMatch?.(); }, 'danger compact');
+    const no = this.btn('NO', () => { scrim.remove(); }, 'primary compact');
+    btns.append(yes, no);
+    pop.append(btns);
+    scrim.append(pop);
+    // Click outside the popup = cancel (same as NO).
+    scrim.addEventListener('mousedown', (e) => { if (e.target === scrim) scrim.remove(); });
+    this.root.append(scrim);
   }
 
   private toggleFullscreen(): void {

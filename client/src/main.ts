@@ -730,6 +730,43 @@ menu.onUnstuck = () => {
   if (offline) { offlineDead = false; localSpawn(myTeam); }
   else room?.send(Msg.Unstuck, {});
 };
+menu.onExitMatch = () => exitMatch();
+
+const fadeover = document.getElementById('fadeover')!;
+
+/**
+ * Leave the current match/practice cleanly and fade back to the Main Menu.
+ * For multiplayer this sends a consented leave so the server runs onLeave
+ * immediately (removing us from the lobby and disposing an emptied room — no
+ * ghost player or ghost lobby). Local match state is fully reset either way.
+ */
+function exitMatch(): void {
+  if (document.pointerLockElement) document.exitPointerLock();
+  // Short fade out, swap to the menu behind the cover, then fade back in.
+  fadeover.classList.add('on');
+  window.setTimeout(() => {
+    const leaving = room;
+    // Reset local match/session state (mirrors the rematch teardown path).
+    started = false; menu.started = false;
+    endShown = false; prevWinner = -1; prevHp = 20; prevCoins = -1;
+    spawned = false;
+    pending.length = 0; batch = [];
+    hotbarOwnedSig = ''; hotbarSig = '';
+    localEffects.clear(); powerCooldownUntil.clear();
+    offlineDead = false;
+    endScreen.hide();
+    objective.reset();
+    menu.hide();
+    resetLocalWorld();
+
+    // Consented leave: server disposes the room when it empties (no ghosts).
+    if (leaving) { try { leaving.leave(true); } catch { /* already closed */ } }
+    room = null; offline = false;
+
+    lobby.showMain();
+    fadeover.classList.remove('on');
+  }, 220);
+}
 
 // ------- Frame loop -------
 let last = performance.now();
@@ -930,9 +967,12 @@ function frame(now: number): void {
     if (bowCharging) viewModel.setBowCharge(Math.min(1, (now - bowStart) / ARROW.chargeMs));
 
     viewModel.update(dt, moving, sprinting, phys.onGround);
-    // Spear thrust nudges the camera slightly forward (weapon extends into reach).
-    const camKick = viewModel.getCameraKick();
-    if (camKick > 0) camera.translateZ(-camKick);
+    // Camera recoil from the active weapon animation (pitch kick, slight roll,
+    // forward lunge for the spear). Applied on top of this frame's view; it is
+    // re-set from input next frame, so it never accumulates or affects aim.
+    const rec = viewModel.getCameraRecoil();
+    if (rec.pitch || rec.roll) { camera.rotation.x -= rec.pitch; camera.rotation.z += rec.roll; }
+    if (rec.fwd > 0) camera.translateZ(-rec.fwd);
     renderHotbar(me);
     // Sync the local view model to the authoritative equipped weapon (e.g.
     // after a purchase auto-equips it, or any server-driven change).

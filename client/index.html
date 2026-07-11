@@ -351,6 +351,11 @@
       0% { opacity: 1; transform: translateY(-10vh) translateX(0) rotate(var(--rot)); }
       100% { opacity: .9; transform: translateY(105vh) translateX(var(--drift)) rotate(calc(var(--rot) + 720deg)); }
     }
+
+    /* --- Fade overlay (smooth transitions between match and menu) --- */
+    #fadeover { position: fixed; inset: 0; z-index: 90; background: #05070c; opacity: 0;
+      pointer-events: none; transition: opacity .22s ease; }
+    #fadeover.on { opacity: 1; }
   </style>
 </head>
 <body>
@@ -374,6 +379,7 @@
   <div id="shopHint">Press <b>E</b> to open Shop</div>
   <div id="hotbar"></div>
   <div id="notice"></div>
+  <div id="fadeover"></div>
   <div id="objective-tracker"></div>
   <div id="objective-popup">
     <div class="obj-overlay"></div>

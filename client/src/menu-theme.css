@@ -442,6 +442,19 @@ body #lobby {
 .pirate-btn.danger:hover { box-shadow: inset 0 0 0 2px #ffb27a, 0 9px 0 #2a0d09, 0 16px 26px rgba(0,0,0,.55), 0 0 22px rgba(214,80,60,.5); }
 .pirate-btn.danger .pb-icon { color: #ffcaa8; }
 
+/* EXIT MATCH — red wood with a gold border + gold-glow hover. */
+.pirate-btn.danger.exit-match {
+  box-shadow:
+    inset 0 0 0 2px var(--gold-line, #f4c95d), inset 0 -6px 12px rgba(0,0,0,.4),
+    0 6px 0 #2a0d09, 0 10px 18px rgba(0,0,0,.5);
+}
+.pirate-btn.danger.exit-match:hover {
+  box-shadow:
+    inset 0 0 0 2px #ffe08a, inset 0 -6px 12px rgba(0,0,0,.4),
+    0 9px 0 #2a0d09, 0 16px 26px rgba(0,0,0,.55), 0 0 24px rgba(255,205,90,.6);
+}
+.pirate-btn.danger.exit-match .pb-label { color: #ffe6b0; letter-spacing: 2px; }
+
 /* Ghost = secondary (Back / Practice). Flatter, darker. */
 .pirate-btn.ghost {
   font-size: 15px; padding: 11px 18px;
