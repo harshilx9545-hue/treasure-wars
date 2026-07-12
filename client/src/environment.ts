@@ -16,6 +16,37 @@ const TREE_URLS: string[] = Object.entries(
 const TREE_COUNT = 55;        // same population as the previous palms
 const TREE_TARGET_H = 5.2;    // normalized trunk-to-canopy height (world units)
 
+/**
+ * Shared low-poly color atlas for the trees ("tree Textures/"). Every temp-
+ * climate tree variant samples this single texture through its UVs (green
+ * canopy band / brown bark band), so one MeshStandardMaterial is reused across
+ * every tree — reproducing the source asset's look with minimal draw state.
+ * The FBX ships no normal/roughness/metallic/AO/opacity/emissive maps, and its
+ * leaves are opaque geometry (not alpha cards), so albedo-only + opaque is the
+ * correct, artifact-free setup.
+ */
+const TREE_TEX_URL: string | undefined = Object.values(
+  import.meta.glob('../../tree Textures/*.png', { eager: true, query: '?url', import: 'default' }) as Record<string, string>,
+)[0];
+
+let treeMaterial: THREE.MeshStandardMaterial | null = null;
+function getTreeMaterial(): THREE.MeshStandardMaterial {
+  if (treeMaterial) return treeMaterial;
+  const mat = new THREE.MeshStandardMaterial({ roughness: 0.9, metalness: 0 });
+  if (TREE_TEX_URL) {
+    const tex = new THREE.TextureLoader().load(TREE_TEX_URL);
+    tex.colorSpace = THREE.SRGBColorSpace; // albedo — keep authored colors
+    // Flat two-band palette: nearest + no mipmaps keeps green/brown crisp and
+    // prevents the bands bleeding into each other at the seam.
+    tex.magFilter = THREE.NearestFilter;
+    tex.minFilter = THREE.NearestFilter;
+    tex.generateMipmaps = false;
+    mat.map = tex;
+  }
+  treeMaterial = mat;
+  return mat;
+}
+
 /** Small seeded PRNG (mulberry32) so every client sees identical decoration. */
 function mulberry32(seed: number): () => number {
   let a = seed >>> 0;
@@ -164,19 +195,21 @@ export class Environment {
       .makeScale(norm, norm, norm)
       .premultiply(new THREE.Matrix4().makeTranslation(-cx * norm, -box.min.y * norm, -cz * norm));
 
-    const parts: Array<{ geo: THREE.BufferGeometry; mat: THREE.Material | THREE.Material[] }> = [];
+    const geos: THREE.BufferGeometry[] = [];
     obj.traverse((o) => {
       const mesh = o as THREE.Mesh;
       if (!(mesh as any).isMesh || !mesh.geometry) return;
       const geo = mesh.geometry.clone();
       geo.applyMatrix4(mesh.matrixWorld); // world-space, then normalize
-      geo.applyMatrix4(bake);
-      parts.push({ geo, mat: mesh.material });
+      geo.applyMatrix4(bake);             // clone/applyMatrix4 preserves UVs
+      geos.push(geo);
     });
-    if (parts.length === 0) return;
+    if (geos.length === 0) return;
 
-    for (const part of parts) {
-      const inst = new THREE.InstancedMesh(part.geo, part.mat, placements.length);
+    // All variants sample the same shared color atlas through their UVs.
+    const mat = getTreeMaterial();
+    for (const geo of geos) {
+      const inst = new THREE.InstancedMesh(geo, mat, placements.length);
       inst.castShadow = true;
       inst.receiveShadow = true;
       for (let i = 0; i < placements.length; i++) {
