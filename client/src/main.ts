@@ -92,9 +92,9 @@ worldRenderer.update(Infinity);
 // Treasure chests replace the beds visually (gameplay logic unchanged).
 let treasure = new Treasure(scene, world);
 
-// Pirate-arena decoration (client-only, non-collidable): ocean, palms, crates,
-// barrels, torches, cannons, flags, ships, statues, rope bridges. The layout is
-// deterministic, so it stays valid across rematches (same regenerated world).
+// Pirate-arena decoration (client-only, non-collidable): ocean, FBX trees,
+// crates, barrels, torches, cannons, flags, ships, statues, rope bridges. The
+// layout is deterministic, so it stays valid across rematches (same world).
 const environment = new Environment(scene, world, spawns);
 
 /** Rebuild the base world + treasures for a rematch (server sends WorldReset). */

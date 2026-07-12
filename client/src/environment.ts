@@ -1,5 +1,20 @@
 import * as THREE from 'three';
+import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
 import { VoxelWorld, BlockType, BASE_Y, SEA_Y, ISLAND_RADIUS, FORT_OFFSET, FORT_HALF, MAP_CENTER, CENTER_RADIUS, TEAMS, type SpawnPoint } from '@bedwars/shared';
+
+/**
+ * FBX tree models (Tree/ at the repo root). Imported as URLs via Vite's glob so
+ * each file is fetched at most once; the loader below caches one normalized
+ * template per variant and every placed tree instances that shared geometry.
+ */
+const TREE_URLS: string[] = Object.entries(
+  import.meta.glob('../../TREE/*.FBX', { eager: true, query: '?url', import: 'default' }) as Record<string, string>,
+)
+  .sort(([a], [b]) => a.localeCompare(b))
+  .map(([, url]) => url);
+
+const TREE_COUNT = 55;        // same population as the previous palms
+const TREE_TARGET_H = 5.2;    // normalized trunk-to-canopy height (world units)
 
 /** Small seeded PRNG (mulberry32) so every client sees identical decoration. */
 function mulberry32(seed: number): () => number {
@@ -15,10 +30,11 @@ function mulberry32(seed: number): () => number {
 const DUMMY = new THREE.Object3D();
 
 /**
- * Client-only pirate-fantasy dressing for the arena: animated ocean, palms,
- * crates/barrels, torches, cannons, team flags, coastal ships, center statues
- * and rope bridges. Everything is instanced or reused (few draw calls) and is
- * purely visual — it never touches the voxel grid, collision or networking.
+ * Client-only pirate-fantasy dressing for the arena: animated ocean, FBX
+ * trees, crates/barrels, torches, cannons, team flags, coastal ships, center
+ * statues and rope bridges. Everything is instanced or reused (few draw calls)
+ * and is purely visual — it never touches the voxel grid, collision or
+ * networking.
  */
 export class Environment {
   private oceanMat: THREE.ShaderMaterial;
@@ -27,7 +43,7 @@ export class Environment {
 
   constructor(scene: THREE.Scene, private world: VoxelWorld, spawns: SpawnPoint[]) {
     this.oceanMat = this.buildOcean(scene);
-    this.buildPalms(scene);
+    this.buildTrees(scene);
     this.buildProps(scene, spawns);
     this.buildTorches(scene, spawns);
     this.buildFortDressing(scene, spawns);
@@ -86,13 +102,15 @@ export class Environment {
     scene.add(inst);
   }
 
-  // --- Palm trees (instanced trunk + crown) scattered on open grass ---
-  private buildPalms(scene: THREE.Scene): void {
+  // --- Trees (FBX models, instanced) scattered on open grass ---
+  // Each unique FBX is loaded once, normalized to a natural height, and every
+  // placement instances the shared geometry so the whole forest stays cheap.
+  private buildTrees(scene: THREE.Scene): void {
     const rng = mulberry32(1337);
-    const trunks: THREE.Matrix4[] = [];
-    const crowns: THREE.Matrix4[] = [];
+    // Placement is computed synchronously (world is ready); models stream in.
+    const spots: Array<{ x: number; z: number; yaw: number; scale: number; variant: number }> = [];
     let tries = 0;
-    while (trunks.length < 55 && tries < 4000) {
+    while (spots.length < TREE_COUNT && tries < 4000) {
       tries++;
       const a = rng() * Math.PI * 2;
       const r = CENTER_RADIUS + 6 + rng() * (ISLAND_RADIUS - CENTER_RADIUS - 10);
@@ -105,21 +123,74 @@ export class Environment {
         if (Math.hypot(x - (MAP_CENTER + dx * FORT_OFFSET), z - (MAP_CENTER + dz * FORT_OFFSET)) < FORT_HALF + 3) nearFort = true;
       }
       if (nearFort) continue;
-      const h = 3.5 + rng() * 2;
-      const lean = (rng() - 0.5) * 0.25;
-      DUMMY.position.set(x + 0.5, BASE_Y + 1 + h / 2, z + 0.5);
-      DUMMY.rotation.set(lean, rng() * 6.28, lean);
-      DUMMY.scale.set(1, h, 1);
-      DUMMY.updateMatrix();
-      trunks.push(DUMMY.matrix.clone());
-      DUMMY.position.set(x + 0.5, BASE_Y + 1 + h, z + 0.5);
-      DUMMY.rotation.set(0, rng() * 6.28, 0);
-      DUMMY.scale.set(2.2, 1.4, 2.2);
-      DUMMY.updateMatrix();
-      crowns.push(DUMMY.matrix.clone());
+      const scale = 0.85 + rng() * 0.4; // natural size variation
+      const yaw = rng() * Math.PI * 2;
+      const variant = TREE_URLS.length > 0 ? Math.floor(rng() * TREE_URLS.length) : 0;
+      spots.push({ x: x + 0.5, z: z + 0.5, yaw, scale, variant });
     }
-    this.buildInstanced(scene, new THREE.CylinderGeometry(0.14, 0.2, 1, 6), new THREE.MeshStandardMaterial({ color: 0x8a5a2b, roughness: 0.9 }), trunks);
-    this.buildInstanced(scene, new THREE.ConeGeometry(0.9, 1, 7), new THREE.MeshStandardMaterial({ color: 0x2e9e4f, roughness: 0.8 }), crowns);
+    if (spots.length === 0 || TREE_URLS.length === 0) return;
+
+    // Which variants are actually used, so we only fetch those models.
+    const used = [...new Set(spots.map((s) => s.variant))];
+    const loader = new FBXLoader();
+    for (const variant of used) {
+      const url = TREE_URLS[variant];
+      const placements = spots.filter((s) => s.variant === variant);
+      loader.load(
+        url,
+        (obj) => this.buildTreeVariant(scene, obj, placements),
+        undefined,
+        (err) => console.error('[bedwars] failed to load tree', url, err),
+      );
+    }
+  }
+
+  /** Normalize one loaded FBX tree and instance it across its placements. */
+  private buildTreeVariant(
+    scene: THREE.Scene,
+    obj: THREE.Object3D,
+    placements: Array<{ x: number; z: number; yaw: number; scale: number }>,
+  ): void {
+    obj.updateWorldMatrix(true, true);
+    // Normalize: uniform scale to a target height, base sitting at y=0, centered
+    // on the trunk. Baked into cloned geometry so instances carry only world TRS.
+    const box = new THREE.Box3().setFromObject(obj);
+    const size = new THREE.Vector3();
+    box.getSize(size);
+    const norm = TREE_TARGET_H / (size.y || 1);
+    const cx = (box.min.x + box.max.x) / 2;
+    const cz = (box.min.z + box.max.z) / 2;
+    const bake = new THREE.Matrix4()
+      .makeScale(norm, norm, norm)
+      .premultiply(new THREE.Matrix4().makeTranslation(-cx * norm, -box.min.y * norm, -cz * norm));
+
+    const parts: Array<{ geo: THREE.BufferGeometry; mat: THREE.Material | THREE.Material[] }> = [];
+    obj.traverse((o) => {
+      const mesh = o as THREE.Mesh;
+      if (!(mesh as any).isMesh || !mesh.geometry) return;
+      const geo = mesh.geometry.clone();
+      geo.applyMatrix4(mesh.matrixWorld); // world-space, then normalize
+      geo.applyMatrix4(bake);
+      parts.push({ geo, mat: mesh.material });
+    });
+    if (parts.length === 0) return;
+
+    for (const part of parts) {
+      const inst = new THREE.InstancedMesh(part.geo, part.mat, placements.length);
+      inst.castShadow = true;
+      inst.receiveShadow = true;
+      for (let i = 0; i < placements.length; i++) {
+        const p = placements[i];
+        DUMMY.position.set(p.x, BASE_Y + 1, p.z);
+        DUMMY.rotation.set(0, p.yaw, 0);
+        DUMMY.scale.setScalar(p.scale);
+        DUMMY.updateMatrix();
+        inst.setMatrixAt(i, DUMMY.matrix);
+      }
+      inst.instanceMatrix.needsUpdate = true;
+      inst.frustumCulled = false;
+      scene.add(inst);
+    }
   }
 
   // --- Crates + barrels near forts, docks and center ---

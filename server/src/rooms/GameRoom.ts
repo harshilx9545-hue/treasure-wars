@@ -47,6 +47,9 @@ const MAX_QUEUE = MAX_INPUTS_PER_TICK * 2;
 const MAX_DIFFS = 20000;
 const ISLAND_ALARM_RADIUS = 13;
 const ALARM_COOLDOWN_MS = 6000;
+// Fall damage: no damage for drops up to SAFE blocks, then 1 hp per extra block.
+const FALL_SAFE_BLOCKS = 3.5;
+const FALL_DMG_PER_BLOCK = 1;
 
 interface ProjMeta { vx: number; vy: number; vz: number; owner: string; team: number; ttl: number; kind: number; damage?: number; }
 
@@ -62,6 +65,10 @@ export class GameRoom extends Room<BedwarsState> {
   private lastAttack = new Map<string, number>();
   private powerCooldownAt = new Map<string, Map<number, number>>();
   private regenAcc = new Map<string, number>();
+  // Fall damage: per-player apex height while airborne + airborne flag, sampled
+  // each tick so damage can be applied on landing.
+  private fallPeakY = new Map<string, number>();
+  private airborne = new Map<string, boolean>();
 
   // Economy / entities
   private genNextAt: number[] = [];
@@ -172,6 +179,8 @@ export class GameRoom extends Room<BedwarsState> {
     this.lastAttack.delete(client.sessionId);
     this.powerCooldownAt.delete(client.sessionId);
     this.regenAcc.delete(client.sessionId);
+    this.fallPeakY.delete(client.sessionId);
+    this.airborne.delete(client.sessionId);
     this.lastDamage.delete(client.sessionId);
     this.assistDamage.delete(client.sessionId);
 
@@ -262,6 +271,7 @@ export class GameRoom extends Room<BedwarsState> {
     phys.x = s.x; phys.y = s.y; phys.z = s.z;
     phys.vx = 0; phys.vy = 0; phys.vz = 0; phys.onGround = false;
     p.x = s.x; p.y = s.y; p.z = s.z; p.vx = 0; p.vy = 0; p.vz = 0;
+    this.clearFall(client.sessionId);
     const q = this.queues.get(client.sessionId);
     if (q) q.length = 0;
     client.send(Msg.Teleport, { x: s.x, y: s.y, z: s.z });
@@ -314,6 +324,7 @@ export class GameRoom extends Room<BedwarsState> {
       const phys = this.phys.get(id);
       if (phys) { phys.x = s.x; phys.y = s.y; phys.z = s.z; phys.vx = 0; phys.vy = 0; phys.vz = 0; phys.onGround = false; }
       const q = this.queues.get(id); if (q) q.length = 0;
+      this.clearFall(id);
       this.respawnAt.delete(id);
       this.lastAttack.delete(id);
       this.powerCooldownAt.get(id)?.clear();
@@ -364,7 +375,8 @@ export class GameRoom extends Room<BedwarsState> {
         p.yaw = input.yaw;
         p.lastSeq = input.seq >>> 0;
       }
-      if (phys.y < VOID_Y) this.die(id, -1);
+      if (phys.y < VOID_Y) { this.die(id, -1); return; }
+      this.updateFallDamage(id, phys);
       p.x = phys.x; p.y = phys.y; p.z = phys.z;
       p.vx = phys.vx; p.vz = phys.vz; p.vy = phys.vy;
     });
@@ -619,6 +631,7 @@ export class GameRoom extends Room<BedwarsState> {
           if (ph && pl?.alive) {
             ph.x = proj.x; ph.y = proj.y + 0.1; ph.z = proj.z; ph.vy = 0; ph.vx = 0; ph.vz = 0;
             pl.x = ph.x; pl.y = ph.y; pl.z = ph.z; pl.vx = 0; pl.vy = 0; pl.vz = 0;
+            this.clearFall(meta.owner);
             const c = this.clients.find((cc) => cc.sessionId === meta.owner);
             c?.send(Msg.Teleport, { x: ph.x, y: ph.y, z: ph.z });
           }
@@ -804,6 +817,49 @@ export class GameRoom extends Room<BedwarsState> {
     p.vx = 0; p.vz = 0; p.vy = 0;
     p.hp = 20; p.alive = true;
     this.respawnAt.delete(id);
+    this.fallPeakY.delete(id);
+    this.airborne.delete(id);
+  }
+
+  /** Reset fall tracking after any teleport/reset so the drop isn't punished. */
+  private clearFall(id: string): void {
+    this.fallPeakY.delete(id);
+    this.airborne.delete(id);
+  }
+
+  /**
+   * Server-authoritative fall damage. Tracks the apex height while a player is
+   * airborne and, on landing, applies 1 hp per block fallen beyond a safe
+   * threshold. Ignores upward knockback launches only for the safe margin; a
+   * long fall after a knockback still hurts. Never triggers in the void (that
+   * path is handled by the VOID_Y death check before this runs).
+   */
+  private updateFallDamage(id: string, phys: PlayerPhysics): void {
+    const wasAirborne = this.airborne.get(id) ?? false;
+    if (!phys.onGround) {
+      // Rising or falling: remember the highest point reached this arc.
+      const peak = this.fallPeakY.get(id);
+      if (!wasAirborne || peak === undefined) this.fallPeakY.set(id, phys.y);
+      else if (phys.y > peak) this.fallPeakY.set(id, phys.y);
+      this.airborne.set(id, true);
+      return;
+    }
+    // Just landed.
+    if (wasAirborne) {
+      const peak = this.fallPeakY.get(id) ?? phys.y;
+      const dropped = peak - phys.y;
+      const over = dropped - FALL_SAFE_BLOCKS;
+      if (over > 0) {
+        const p = this.state.players.get(id);
+        if (p && p.alive) {
+          const dmg = Math.max(1, Math.round(over * FALL_DMG_PER_BLOCK));
+          if (dmg >= p.hp) this.die(id, -1);
+          else p.hp -= dmg; // hp drop syncs via state; client auto-flashes damage
+        }
+      }
+    }
+    this.airborne.set(id, false);
+    this.fallPeakY.delete(id);
   }
 
   /** Timer expired: rank teams by treasure alive, then kills, then survivors. */
