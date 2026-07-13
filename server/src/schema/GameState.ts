@@ -11,6 +11,10 @@ export class PlayerState extends Schema {
   @type('uint8') team = 0;
   @type('uint8') hp = 20;
   @type('boolean') alive = true;
+  /** Server-owned AI player; replicated so all clients render it like any other player. */
+  @type('boolean') isBot = false;
+  /** 0 easy, 1 medium, 2 hard. This is presentation/debug data only. */
+  @type('uint8') botDifficulty = 0;
   @type('uint32') lastSeq = 0; // last processed input, acks prediction
   // Combat stats
   @type('uint16') kills = 0;
@@ -59,7 +63,7 @@ export class Projectile extends Schema {
   @type('number') x = 0;
   @type('number') y = 0;
   @type('number') z = 0;
-  @type('uint8') kind = 0; // 0 = pearl, 1 = fireball
+  @type('uint8') kind = 0; // 0 = pearl, 1 = fireball, 2 = arrow
   @type('uint8') team = 0;
 }
 
@@ -83,5 +87,6 @@ export class BedwarsState extends Schema {
   @type('string') hostId = '';
   @type('uint8') durationMin = 10; // host-selected match length (5 / 10 / 20)
   @type('uint8') teamSize = 2; // host-selected players-per-team preference (1 / 2 / 4)
+  @type('uint8') botCount = 0; // host-selected server-owned bot players (0..7)
   @type('uint32') timeLeftMs = 0; // remaining match time (counts down while playing)
 }

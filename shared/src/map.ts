@@ -32,6 +32,17 @@ export interface SpawnPoint {
   gz: number;
 }
 
+/** Center of a team's two-block Treasure, used by objective systems and bots. */
+export function treasurePosition(team: number): { x: number; y: number; z: number } {
+  const dirs: Array<[number, number]> = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+  const [dx, dz] = dirs[team] ?? dirs[0]!;
+  return {
+    x: MAP_CENTER + dx * (FORT_OFFSET + 8) + 0.5,
+    y: BASE_Y + 1,
+    z: MAP_CENTER + dz * (FORT_OFFSET + 8) + 0.5,
+  };
+}
+
 // Deterministic hash -> 0..1 (stable on every machine; used for coast jitter,
 // rubble and pillar height variation so client and server agree exactly).
 function h2(x: number, z: number): number {

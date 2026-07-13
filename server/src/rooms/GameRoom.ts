@@ -28,6 +28,7 @@ import {
   WEAPONS,
   WeaponId,
   STARTING_WEAPONS,
+  treasurePosition,
   type SpawnPoint,
   type MoveInput,
   type PlayerPhysics,
@@ -41,6 +42,7 @@ import {
   type StepMods,
 } from '@bedwars/shared';
 import { BedwarsState, PlayerState, TeamState, CoinDrop, Projectile, Tnt } from '../schema/GameState';
+import { BotController, BotDifficulty } from '../bots/BotController';
 
 const MAX_INPUTS_PER_TICK = 8;
 const MAX_QUEUE = MAX_INPUTS_PER_TICK * 2;
@@ -51,7 +53,7 @@ const ALARM_COOLDOWN_MS = 6000;
 const FALL_SAFE_BLOCKS = 3.5;
 const FALL_DMG_PER_BLOCK = 1;
 
-interface ProjMeta { vx: number; vy: number; vz: number; owner: string; team: number; ttl: number; kind: number; damage?: number; }
+interface ProjMeta { vx: number; vy: number; vz: number; owner: string; team: number; ttl: number; kind: number; damage?: number; gravity?: number; }
 
 export class GameRoom extends Room<BedwarsState> {
   maxClients = 16;
@@ -79,6 +81,10 @@ export class GameRoom extends Room<BedwarsState> {
   // Kill/assist attribution: victimId -> last attacker, and victimId -> recent attackers.
   private lastDamage = new Map<string, { by: string; at: number }>();
   private assistDamage = new Map<string, Map<string, number>>();
+  /** Bots are state entries, not Colyseus clients. Their ids are reserved here. */
+  private botIds = new Set<string>();
+  private bots!: BotController;
+  private nextBotId = 1;
 
   onCreate(options: any): void {
     this.setState(new BedwarsState());
@@ -88,6 +94,31 @@ export class GameRoom extends Room<BedwarsState> {
       this.genNextAt.push(0);
       this.lastAlarmAt.push(0);
     }
+    this.bots = new BotController({
+      world: this.world,
+      spawns: this.spawns,
+      treasures: Array.from({ length: TEAM_COUNT }, (_, t) => treasurePosition(t)),
+      getPlayer: (id) => this.state.players.get(id),
+      getPhysics: (id) => this.phys.get(id),
+      players: () => {
+        const players: Array<[string, PlayerState]> = [];
+        this.state.players.forEach((p, id) => players.push([id, p]));
+        return players;
+      },
+      bedsAlive: () => this.state.bedsAlive,
+      enqueue: (id, input) => {
+        const q = this.queues.get(id);
+        if (q && q.length < MAX_QUEUE) q.push(input);
+      },
+      equip: (id, weapon) => this.selectWeaponFor(id, weapon),
+      block: (id, enabled) => {
+        const p = this.state.players.get(id);
+        if (p) p.blocking = enabled && p.weapon === WeaponId.Shield;
+      },
+      attack: (id, target, aimError) => this.tryAttackFor(id, target, false, aimError),
+      breakBlock: (id, x, y, z) => this.tryBreakFor(id, { x, y, z }),
+      placeBlock: (id, x, y, z, block) => this.tryPlaceFor(id, { x, y, z, block }),
+    });
 
     // Lobby / matchmaking
     this.onMessage(Msg.SetName, (client, m: { name?: string }) => {
@@ -139,6 +170,11 @@ export class GameRoom extends Room<BedwarsState> {
       if (this.state.phase !== 'lobby' || client.sessionId !== this.state.hostId) return;
       const size = Number(m?.size);
       if (size === 1 || size === 2 || size === 4) this.state.teamSize = size;
+    });
+    this.onMessage(Msg.SetBotCount, (client, m: { count?: number }) => {
+      if (this.state.phase !== 'lobby' || client.sessionId !== this.state.hostId) return;
+      const count = Number(m?.count);
+      if (Number.isInteger(count) && count >= 0 && count <= 7) this.syncBots(count);
     });
     this.onMessage(Msg.Ping, (client, t: number) => client.send(Msg.Pong, t));
 
@@ -202,10 +238,11 @@ export class GameRoom extends Room<BedwarsState> {
   // --- Lobby ---
 
   private handleHostLeft(): void {
-    // Promote the earliest remaining player to host, else the lobby is empty.
-    const next = this.state.players.keys().next();
-    if (!next.done) {
-      this.state.hostId = next.value as string;
+    // Bots are server-owned state, never hosts. Promote the earliest connected
+    // human instead.
+    const nextClient = this.clients.find((c) => this.state.players.has(c.sessionId));
+    if (nextClient) {
+      this.state.hostId = nextClient.sessionId;
       const np = this.state.players.get(this.state.hostId);
       this.broadcast(Msg.Lobby, { kind: 'host', hostId: this.state.hostId });
       if (this.state.phase === 'lobby') {
@@ -244,6 +281,13 @@ export class GameRoom extends Room<BedwarsState> {
       p.weapons = owned;
       p.weapon = STARTING_WEAPONS[0] ?? WeaponId.IronSword;
       p.blocking = false;
+      // Bots are given a compact tactical loadout at match start. They still
+      // collect generators and share every regular combat/block validation,
+      // but this lets a mixed bot squad cover each required weapon role.
+      if (p.isBot) {
+        p.wool = ECONOMY.starting.wool * 2;
+        p.weapons = (1 << WeaponId.IronSword) | (1 << WeaponId.Axe) | (1 << WeaponId.Spear) | (1 << WeaponId.Bow) | (1 << WeaponId.Shield);
+      }
       this.respawn(id);
     });
     this.feed('The match has begun! Defend your Treasure.');
@@ -259,6 +303,53 @@ export class GameRoom extends Room<BedwarsState> {
       phase: this.state.phase,
       players: this.state.players.size,
     }).catch(() => {});
+  }
+
+  /** Create/remove synchronized AI players while the host configures the lobby. */
+  private syncBots(count: number): void {
+    const desired = Math.max(0, Math.min(7, count | 0));
+    const ids = [...this.botIds];
+    while (ids.length > desired) {
+      const id = ids.pop()!;
+      this.botIds.delete(id);
+      this.bots.remove(id);
+      this.state.players.delete(id);
+      this.phys.delete(id);
+      this.queues.delete(id);
+      this.respawnAt.delete(id);
+      this.lastAttack.delete(id);
+      this.powerCooldownAt.delete(id);
+      this.regenAcc.delete(id);
+    }
+    while (this.botIds.size < desired) {
+      const id = `bot:${this.nextBotId++}`;
+      const team = this.pickTeam();
+      const spawn = this.spawns[team]!;
+      const p = new PlayerState();
+      const difficulty = (this.botIds.size % 3) as BotDifficulty;
+      p.x = spawn.x; p.y = spawn.y; p.z = spawn.z;
+      p.team = team; p.name = `${['Easy', 'Medium', 'Hard'][difficulty]} Bot ${this.nextBotId - 1}`;
+      p.ready = true; p.isBot = true; p.botDifficulty = difficulty;
+      this.state.players.set(id, p);
+      this.phys.set(id, { x: spawn.x, y: spawn.y, z: spawn.z, vx: 0, vy: 0, vz: 0, onGround: false });
+      this.queues.set(id, []);
+      this.powerCooldownAt.set(id, new Map());
+      this.regenAcc.set(id, 0);
+      this.botIds.add(id);
+      this.bots.add(id, difficulty, this.nextBotId);
+    }
+    this.state.botCount = desired;
+    this.updateMetadata();
+  }
+
+  private resetBotBrains(): void {
+    this.bots.clear();
+    this.botIds.clear();
+    this.state.players.forEach((p, id) => {
+      if (!p.isBot) return;
+      this.botIds.add(id);
+      this.bots.add(id, p.botDifficulty as BotDifficulty, Number(id.split(':')[1]) || 0);
+    });
   }
 
   /** Anti-stuck: teleport an alive player back to their team spawn safely. */
@@ -285,8 +376,11 @@ export class GameRoom extends Room<BedwarsState> {
 
   /** Reset a finished match back to a fresh lobby (same room, no disconnects). */
   private resetMatch(): void {
-    this.world = new VoxelWorld();
-    this.spawns = generateMap(this.world);
+    // Keep these objects stable: BotController owns references to the same
+    // deterministic world and spawn list used by normal player simulation.
+    this.world.data.fill(0);
+    const freshSpawns = generateMap(this.world);
+    this.spawns.splice(0, this.spawns.length, ...freshSpawns);
     this.diffs = [];
 
     this.state.bedsAlive = 0b1111;
@@ -311,7 +405,7 @@ export class GameRoom extends Room<BedwarsState> {
 
     this.state.players.forEach((p, id) => {
       const s = this.spawns[p.team];
-      p.ready = false;
+      p.ready = p.isBot;
       p.alive = true; p.hp = 20;
       p.x = s.x; p.y = s.y; p.z = s.z; p.vx = 0; p.vy = 0; p.vz = 0; p.yaw = 0;
       p.coins = 0; p.coinsEarned = 0;
@@ -331,6 +425,8 @@ export class GameRoom extends Room<BedwarsState> {
       this.regenAcc.set(id, 0);
     });
 
+    this.resetBotBrains();
+
     this.unlock().catch(() => {});
     this.broadcast(Msg.WorldReset, {});
     this.feed('Returning to lobby — ready up for another match!');
@@ -348,6 +444,10 @@ export class GameRoom extends Room<BedwarsState> {
       this.state.timeLeftMs = Math.max(0, this.state.timeLeftMs - TICK_MS);
       if (this.state.timeLeftMs <= 0) { this.endByTime(); return; }
     }
+
+    // AI only decides at its difficulty-specific cadence, but feeds the exact
+    // same queued MoveInput + physics controller used by every human player.
+    this.bots.tick(now);
 
     this.state.players.forEach((p, id) => {
       const phys = this.phys.get(id);
@@ -475,6 +575,7 @@ export class GameRoom extends Room<BedwarsState> {
       case 'weapon_axe': this.buyWeapon(client, p, WeaponId.Axe, charge, notice); break;
       case 'weapon_pickaxe': this.buyWeapon(client, p, WeaponId.Pickaxe, charge, notice); break;
       case 'weapon_spear': this.buyWeapon(client, p, WeaponId.Spear, charge, notice); break;
+      case 'weapon_bow': this.buyWeapon(client, p, WeaponId.Bow, charge, notice); break;
       case 'weapon_shield': this.buyWeapon(client, p, WeaponId.Shield, charge, notice); break;
       case 'weapon_doubleaxe': this.buyWeapon(client, p, WeaponId.DoubleAxe, charge, notice); break;
       case 'armor': {
@@ -602,7 +703,7 @@ export class GameRoom extends Room<BedwarsState> {
       const meta = this.projMeta.get(key);
       if (!meta) { remove.push(key); return; }
       meta.ttl -= dt;
-      if (meta.kind === 1) meta.vy -= 12 * dt; // fireball gravity
+      if (meta.kind === 1 || meta.kind === 2) meta.vy -= (meta.gravity ?? (meta.kind === 1 ? 12 : 11)) * dt;
 
       // Substep to avoid tunneling through thin walls.
       const steps = 6;
@@ -614,7 +715,7 @@ export class GameRoom extends Room<BedwarsState> {
         proj.y += meta.vy * sdt;
         proj.z += meta.vz * sdt;
         if (this.world.isSolid(Math.floor(proj.x), Math.floor(proj.y), Math.floor(proj.z))) { landed = true; break; }
-        // Enemy player collision (fireball only deals contact hit -> explode).
+        // Enemy collision for fireballs and authoritative bow arrows.
         this.state.players.forEach((pl, pid) => {
           if (hitPlayer || pid === meta.owner || !pl.alive || pl.team === meta.team) return;
           const dx = pl.x - proj.x; const dy = pl.y + 1 - proj.y; const dz = pl.z - proj.z;
@@ -638,6 +739,8 @@ export class GameRoom extends Room<BedwarsState> {
         } else if (meta.kind === 1) {
           const f = ECONOMY.utility.fireball;
           this.explode(proj.x, proj.y, proj.z, f.radius, f.damage, f.knockback, meta.owner, meta.team, 'fireball');
+        } else if (meta.kind === 2 && hitPlayer) {
+          this.applyMeleeDamage(meta.owner, hitPlayer, meta.damage ?? 6, 0.55, false);
         }
         remove.push(key);
       }
@@ -760,6 +863,7 @@ export class GameRoom extends Room<BedwarsState> {
     let am = this.assistDamage.get(victimId);
     if (!am) { am = new Map(); this.assistDamage.set(victimId, am); }
     am.set(attackerId, now);
+    this.bots.onDamaged(victimId, attackerId);
   }
 
   /** Credit a kill (+ assists) on death; falls back to the last damager (void/knockback kills). */
@@ -936,37 +1040,46 @@ export class GameRoom extends Room<BedwarsState> {
   }
 
   private tryPlace(client: Client, m: PlaceMessage): void {
-    if (this.state.phase !== 'playing') return;
+    this.tryPlaceFor(client.sessionId, m, (text, ok) => client.send(Msg.Notice, { text, ok }));
+  }
+
+  private tryPlaceFor(id: string, m: PlaceMessage, notice?: (text: string, ok: boolean) => void): boolean {
+    if (this.state.phase !== 'playing') return false;
     const { x, y, z, block } = m ?? {};
-    if (!Number.isInteger(x) || !Number.isInteger(y) || !Number.isInteger(z)) return;
-    const p = this.state.players.get(client.sessionId);
-    if (!p?.alive) return;
+    if (!Number.isInteger(x) || !Number.isInteger(y) || !Number.isInteger(z)) return false;
+    const p = this.state.players.get(id);
+    if (!p?.alive) return false;
     const def = BLOCKS[block];
-    if (!def?.placeable) return;
+    if (!def?.placeable) return false;
     // Must own the block in inventory.
     const field = this.invFieldFor(p, block);
-    if (!field || p[field] <= 0) { client.send(Msg.Notice, { text: 'Out of that block', ok: false }); return; }
-    if (!this.world.inBounds(x, y, z)) return;
-    if (this.world.get(x, y, z) !== BlockType.Air) return;
-    if (!this.inReach(client.sessionId, x, y, z)) return;
-    if (this.intersectsAnyPlayer(x, y, z)) return;
+    if (!field || p[field] <= 0) { notice?.('Out of that block', false); return false; }
+    if (!this.world.inBounds(x, y, z)) return false;
+    if (this.world.get(x, y, z) !== BlockType.Air) return false;
+    if (!this.inReach(id, x, y, z)) return false;
+    if (this.intersectsAnyPlayer(x, y, z)) return false;
     p[field] -= 1;
     this.applyBlock(x, y, z, block);
+    return true;
   }
 
   private tryBreak(client: Client, m: BreakMessage): void {
-    if (this.state.phase !== 'playing') return;
+    this.tryBreakFor(client.sessionId, m);
+  }
+
+  private tryBreakFor(id: string, m: BreakMessage): boolean {
+    if (this.state.phase !== 'playing') return false;
     const { x, y, z } = m ?? {};
-    if (!Number.isInteger(x) || !Number.isInteger(y) || !Number.isInteger(z)) return;
-    const p = this.state.players.get(client.sessionId);
-    if (!p?.alive) return;
+    if (!Number.isInteger(x) || !Number.isInteger(y) || !Number.isInteger(z)) return false;
+    const p = this.state.players.get(id);
+    if (!p?.alive) return false;
     const b = this.world.get(x, y, z);
-    if (b === BlockType.Air || !BLOCKS[b]?.breakable) return;
-    if (!this.inReach(client.sessionId, x, y, z)) return;
+    if (b === BlockType.Air || !BLOCKS[b]?.breakable) return false;
+    if (!this.inReach(id, x, y, z)) return false;
 
     const bt = bedTeam(b);
     if (bt >= 0) {
-      if (p.team === bt) return;
+      if (p.team === bt) return false;
       this.applyBlock(x, y, z, BlockType.Air);
       for (const [ox, oz] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
         if (this.world.get(x + ox, y, z + oz) === b) this.applyBlock(x + ox, y, z + oz, BlockType.Air);
@@ -975,41 +1088,47 @@ export class GameRoom extends Room<BedwarsState> {
       this.broadcast(Msg.BedDestroyed, { team: bt, by: p.team, x, y, z });
       this.feed(`${TEAMS[bt].name} Treasure was destroyed by ${p.name}! They can no longer respawn.`);
       this.checkWin();
-      return;
+      return true;
     }
     this.applyBlock(x, y, z, BlockType.Air);
+    return true;
   }
 
   private tryAttack(client: Client, m: AttackMessage): void {
-    if (this.state.phase !== 'playing') return;
-    const attacker = this.state.players.get(client.sessionId);
-    if (!attacker?.alive) return;
-    const targetId = m?.target;
-    if (typeof targetId !== 'string') return;
+    this.tryAttackFor(client.sessionId, m?.target, !!m?.crit);
+  }
+
+  private tryAttackFor(id: string, targetId: unknown, crit: boolean, aimError = 0): boolean {
+    if (this.state.phase !== 'playing') return false;
+    const attacker = this.state.players.get(id);
+    if (!attacker?.alive) return false;
+    if (typeof targetId !== 'string') return false;
     const victim = this.state.players.get(targetId);
-    if (!victim?.alive || targetId === client.sessionId) return;
-    if (victim.team === attacker.team) return;
+    if (!victim?.alive || targetId === id) return false;
+    if (victim.team === attacker.team) return false;
 
     // Active weapon governs damage / cooldown / range / knockback.
     const weapon = WEAPONS[attacker.weapon as WeaponId] ?? WEAPONS[WeaponId.IronSword];
-    if (weapon.shield || attacker.blocking) return; // can't attack while shielding
+    if (weapon.shield || attacker.blocking) return false; // can't attack while shielding
 
     const now = Date.now();
-    const last = this.lastAttack.get(client.sessionId) ?? 0;
-    if (now - last < weapon.cooldownMs) return;
+    const last = this.lastAttack.get(id) ?? 0;
+    if (now - last < weapon.cooldownMs) return false;
 
-    const ap = this.phys.get(client.sessionId);
+    const ap = this.phys.get(id);
     const vp = this.phys.get(targetId);
-    if (!ap || !vp) return;
+    if (!ap || !vp) return false;
 
     const dx = vp.x - ap.x;
     const dy = vp.y + PLAYER_EYE * 0.5 - (ap.y + PLAYER_EYE);
     const dz = vp.z - ap.z;
     const dist = Math.hypot(dx, dy, dz);
-    if (dist > weapon.range + 0.8) return;
+    if (dist > weapon.range + 0.8) return false;
 
-    this.lastAttack.set(client.sessionId, now);
-    this.applyMeleeDamage(client.sessionId, targetId, weapon.damage, weapon.knockback, !!m.crit);
+    this.lastAttack.set(id, now);
+    if (weapon.ranged) this.fireArrow(id, targetId, weapon, aimError);
+    else this.applyMeleeDamage(id, targetId, weapon.damage, weapon.knockback, crit);
+    return true;
   }
 
   /** Shared melee resolution (weapons + explosions can reuse the knockback/armor path). */
@@ -1049,10 +1168,47 @@ export class GameRoom extends Room<BedwarsState> {
     this.broadcast(Msg.Hit, { target: targetId, by: attackerId, x: vp.x, y: vp.y + 1, z: vp.z, crit, fatal });
   }
 
+  /** Spawn a server-authoritative arrow. Bots pass an aim error by difficulty; human shots use zero error. */
+  private fireArrow(attackerId: string, targetId: string, weapon: typeof WEAPONS[WeaponId.Bow], aimError: number): void {
+    const ap = this.phys.get(attackerId);
+    const vp = this.phys.get(targetId);
+    const attacker = this.state.players.get(attackerId);
+    if (!ap || !vp || !attacker || !weapon.ranged) return;
+    const cfg = weapon.ranged;
+    const horizontal = Math.hypot(vp.x - ap.x, vp.z - ap.z);
+    const t = Math.max(0.08, horizontal / cfg.speed);
+    const errorX = (Math.random() - 0.5) * aimError;
+    const errorY = (Math.random() - 0.5) * aimError * 0.35;
+    const errorZ = (Math.random() - 0.5) * aimError;
+    const tx = vp.x + vp.vx * t + errorX;
+    const tz = vp.z + vp.vz * t + errorZ;
+    const oy = ap.y + PLAYER_EYE;
+    const ty = vp.y + PLAYER_EYE * 0.55 + vp.vy * t + errorY;
+    const dx = tx - ap.x; const dz = tz - ap.z;
+    const h = Math.hypot(dx, dz) || 1;
+    const proj = new Projectile();
+    proj.x = ap.x + (dx / h) * 0.7;
+    proj.y = oy;
+    proj.z = ap.z + (dz / h) * 0.7;
+    proj.kind = 2; proj.team = attacker.team;
+    const key = `p${this.idCounter++}`;
+    this.state.projectiles.set(key, proj);
+    this.projMeta.set(key, {
+      vx: (dx / h) * cfg.speed,
+      vy: (ty - oy + 0.5 * cfg.gravity * t * t) / t,
+      vz: (dz / h) * cfg.speed,
+      owner: attackerId, team: attacker.team, ttl: cfg.projectileLifetimeMs / 1000,
+      kind: 2, damage: weapon.damage, gravity: cfg.gravity,
+    });
+  }
+
   private trySelectWeapon(client: Client, m: { weapon?: number }): void {
-    const p = this.state.players.get(client.sessionId);
+    this.selectWeaponFor(client.sessionId, m?.weapon as WeaponId);
+  }
+
+  private selectWeaponFor(id: string, w: WeaponId): void {
+    const p = this.state.players.get(id);
     if (!p) return;
-    const w = m?.weapon as WeaponId;
     if (!(w in WEAPONS)) return;
     if (!((p.weapons >> w) & 1)) return; // must own it
     p.weapon = w;

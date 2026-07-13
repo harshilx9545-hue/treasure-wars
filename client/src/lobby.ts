@@ -40,6 +40,7 @@ export class Lobby {
   private noticeText = '';
   private selDuration = 10;
   private selTeamSize = 2;
+  private selBotCount = 0;
 
   constructor(private deps: LobbyDeps) {
     this.root.id = 'lobby';
@@ -234,9 +235,14 @@ export class Lobby {
     const renderTeam = () => { teamPills.innerHTML = ''; for (const t of [1, 2, 4]) teamPills.append(this.pill(TEAM_LABEL[t], this.selTeamSize === t, () => { this.selTeamSize = t; renderTeam(); })); };
     renderTeam(); teamField.append(teamPills);
 
+    const botField = this.field('Bot Players');
+    const botPills = document.createElement('div'); botPills.className = 'pirate-pills';
+    const renderBots = () => { botPills.innerHTML = ''; for (const n of [0, 1, 2, 3, 4, 5, 6, 7]) botPills.append(this.pill(String(n), this.selBotCount === n, () => { this.selBotCount = n; renderBots(); })); };
+    renderBots(); botField.append(botPills);
+
     c.append(
       this.title('HOST GAME', true),
-      durField, teamField,
+      durField, teamField, botField,
       this.pbtn('\u2691', 'Create Lobby', () => this.doHost(), 'primary'),
       this.pbtn('\u2190', 'Back', () => this.showPlay(), 'ghost'),
       this.noticeBar(),
@@ -353,6 +359,7 @@ export class Lobby {
       this.attach(room);
       room.send(Msg.SetDuration, { minutes: this.selDuration });
       room.send(Msg.SetTeamSize, { size: this.selTeamSize });
+      room.send(Msg.SetBotCount, { count: this.selBotCount });
     } catch { this.showHost(); this.notice('Failed to host — is the server running?'); }
   }
   private async doJoin(code: string): Promise<void> {
@@ -415,11 +422,14 @@ export class Lobby {
       for (const m of [5, 10, 20]) durPills.append(this.pill(`${m}m`, state.durationMin === m, () => room.send(Msg.SetDuration, { minutes: m })));
       const teamPills = document.createElement('div'); teamPills.className = 'pirate-pills mini';
       for (const t of [1, 2, 4]) teamPills.append(this.pill(TEAM_LABEL[t], state.teamSize === t, () => room.send(Msg.SetTeamSize, { size: t })));
+      const botPills = document.createElement('div'); botPills.className = 'pirate-pills mini';
+      for (const n of [0, 1, 2, 3, 4, 5, 6, 7]) botPills.append(this.pill(String(n), state.botCount === n, () => room.send(Msg.SetBotCount, { count: n })));
       const d = document.createElement('div'); d.className = 'lb-set-line'; d.append(Object.assign(document.createElement('span'), { textContent: 'Duration' }), durPills);
       const e = document.createElement('div'); e.className = 'lb-set-line'; e.append(Object.assign(document.createElement('span'), { textContent: 'Teams' }), teamPills);
-      settingsRow.append(d, e);
+      const b = document.createElement('div'); b.className = 'lb-set-line'; b.append(Object.assign(document.createElement('span'), { textContent: 'Bot Players' }), botPills);
+      settingsRow.append(d, e, b);
     } else {
-      settingsRow.innerHTML = `<div class="lb-set-info">${state.durationMin} min \u00B7 ${TEAM_LABEL[state.teamSize] ?? state.teamSize}</div>`;
+      settingsRow.innerHTML = `<div class="lb-set-info">${state.durationMin} min \u00B7 ${TEAM_LABEL[state.teamSize] ?? state.teamSize} \u00B7 ${state.botCount ?? 0} bot${state.botCount === 1 ? '' : 's'}</div>`;
     }
 
     const list = document.createElement('div');
@@ -432,8 +442,9 @@ export class Lobby {
       const color = `#${TEAMS[p.team].color.toString(16).padStart(6, '0')}`;
       const you = id === room.sessionId ? ' (you)' : '';
       const host = id === state.hostId ? ' \u265B' : '';
+      const bot = p.isBot ? ` [${['Easy', 'Medium', 'Hard'][p.botDifficulty ?? 0]} Bot]` : '';
       row.innerHTML = `<span><span class="sb-dot" style="background:${color}"></span>${p.name}${you}${host}</span>` +
-        `<span class="${p.ready ? 'rdy' : 'notrdy'}">${p.ready ? 'READY' : 'waiting'}</span>`;
+        `<span class="${p.ready ? 'rdy' : 'notrdy'}">${p.ready ? 'READY' : 'waiting'}${bot}</span>`;
       list.append(row);
     });
 

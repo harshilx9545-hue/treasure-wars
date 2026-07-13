@@ -14,6 +14,7 @@ export enum WeaponId {
   Spear = 3,
   Shield = 4,
   DoubleAxe = 5,
+  Bow = 6,
 }
 
 export interface WeaponDef {
@@ -27,6 +28,8 @@ export interface WeaponDef {
   knockback: number; // horizontal knockback multiplier
   breakMult: number; // block-mining speed multiplier while held
   shield: boolean; // shield: blocks, cannot attack
+  /** Ranged weapons use the authoritative projectile path rather than melee reach. */
+  ranged?: { speed: number; gravity: number; projectileLifetimeMs: number };
   color: number; // UI accent
   // First-person / hand attachment transform (tunable, per-weapon).
   fp: { scale: number; pos: [number, number, number]; rot: [number, number, number] };
@@ -77,6 +80,13 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
     damage: 11, cooldownMs: 1000, range: 3.0, knockback: 2.2, breakMult: 1.2,
     shield: false, color: 0xd05a3a,
     fp: { scale: 1, pos: [0.46, -0.44, -0.72], rot: [-10 * D, 0, 6 * D] },
+    hand: { scale: 1, pos: [0.02, 0, 0.02], rot: [0, 0, 0] },
+  },
+  [WeaponId.Bow]: {
+    id: WeaponId.Bow, name: 'Bow', glb: 'bow_1', price: 45,
+    damage: 6, cooldownMs: 850, range: 30, knockback: 0.55, breakMult: 0.8,
+    shield: false, ranged: { speed: 34, gravity: 11, projectileLifetimeMs: 1800 }, color: 0xa56a38,
+    fp: { scale: 1, pos: [0.44, -0.42, -0.72], rot: [-8 * D, 0, 0] },
     hand: { scale: 1, pos: [0.02, 0, 0.02], rot: [0, 0, 0] },
   },
 };

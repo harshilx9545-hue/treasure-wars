@@ -103,6 +103,7 @@ export type ShopItemId =
   | 'weapon_axe'
   | 'weapon_pickaxe'
   | 'weapon_spear'
+  | 'weapon_bow'
   | 'weapon_shield'
   | 'weapon_doubleaxe'
   | 'sword' // legacy sword-tier upgrade (kept for compatibility)

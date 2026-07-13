@@ -24,6 +24,7 @@ export class EntityRenderer {
 
     const pearlMat = new THREE.MeshStandardMaterial({ color: 0x1fe0a0, emissive: 0x0a5a44, roughness: 0.4 });
     const fireMat = new THREE.MeshStandardMaterial({ color: 0xff7a1a, emissive: 0xff4400, emissiveIntensity: 1.2, roughness: 0.5 });
+    const arrowMat = new THREE.MeshStandardMaterial({ color: 0x9b6232, metalness: 0.15, roughness: 0.75 });
     const projGeo = new THREE.SphereGeometry(0.28, 10, 8);
     for (let i = 0; i < 24; i++) {
       const m = new THREE.Mesh(projGeo, i % 2 === 0 ? pearlMat : fireMat);
@@ -34,6 +35,7 @@ export class EntityRenderer {
     // store both materials for reassignment
     this.pearlMat = pearlMat;
     this.fireMat = fireMat;
+    this.arrowMat = arrowMat;
 
     const tntGeo = new THREE.BoxGeometry(1, 1, 1);
     const tntMat = new THREE.MeshStandardMaterial({ color: 0xd23b2b, emissive: 0x330000, roughness: 0.7 });
@@ -48,6 +50,7 @@ export class EntityRenderer {
 
   private pearlMat!: THREE.Material;
   private fireMat!: THREE.Material;
+  private arrowMat!: THREE.Material;
 
   sync(state: any, dt: number): void {
     this.spin += dt * 2.5;
@@ -69,7 +72,7 @@ export class EntityRenderer {
       const m = this.projs[pi++];
       if (!m) return;
       m.visible = true;
-      m.material = p.kind === 0 ? this.pearlMat : this.fireMat;
+      m.material = p.kind === 0 ? this.pearlMat : p.kind === 2 ? this.arrowMat : this.fireMat;
       m.position.set(p.x, p.y, p.z);
       m.rotation.y = this.spin * 2;
     });

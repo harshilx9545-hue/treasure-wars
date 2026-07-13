@@ -34,6 +34,7 @@ export const Msg = {
   WorldReset: 'wr', // server -> all: rebuild the base world for a rematch
   SetDuration: 'dur', // client(host) -> server: { minutes } chosen match length
   SetTeamSize: 'tsz', // client(host) -> server: { size } players-per-team preference
+  SetBotCount: 'bot', // client(host) -> server: { count } bot players (0..7)
 } as const;
 
 export type InputBatch = MoveInput[];

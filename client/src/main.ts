@@ -394,6 +394,7 @@ function localBuy(id: string): void {
     case 'weapon_axe': buyWeaponLocal(WeaponId.Axe, charge, notice); break;
     case 'weapon_pickaxe': buyWeaponLocal(WeaponId.Pickaxe, charge, notice); break;
     case 'weapon_spear': buyWeaponLocal(WeaponId.Spear, charge, notice); break;
+    case 'weapon_bow': buyWeaponLocal(WeaponId.Bow, charge, notice); break;
     case 'weapon_shield': buyWeaponLocal(WeaponId.Shield, charge, notice); break;
     case 'weapon_doubleaxe': buyWeaponLocal(WeaponId.DoubleAxe, charge, notice); break;
     case 'armor': { const n = team.armorTier + 1; if (n >= ECONOMY.armor.length) { notice('Max armor tier', false); return; } if (!charge(ECONOMY.armor[n].price)) return; team.armorTier = n; notice(`Team armor: ${ECONOMY.armor[n].name}`, true); break; }
@@ -424,7 +425,8 @@ function buyWeaponLocal(w: WeaponId, charge: (c: number) => boolean, notice: (t:
 function findAttackTarget(): string | null {
   const positions = remotes.positions();
   let best: string | null = null;
-  let bestDist = ATTACK_REACH + 0.8;
+  const weapon = activeWeaponDef();
+  let bestDist = (weapon?.range ?? ATTACK_REACH) + 0.8;
   for (const p of positions) {
     const dx = p.x - camera.position.x;
     const dy = p.y + 1.0 - camera.position.y;

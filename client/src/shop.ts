@@ -6,6 +6,7 @@ const WEAPON_SHOP_ID: Partial<Record<WeaponId, ShopItemId>> = {
   [WeaponId.Axe]: 'weapon_axe',
   [WeaponId.Pickaxe]: 'weapon_pickaxe',
   [WeaponId.Spear]: 'weapon_spear',
+  [WeaponId.Bow]: 'weapon_bow',
   [WeaponId.Shield]: 'weapon_shield',
   [WeaponId.DoubleAxe]: 'weapon_doubleaxe',
 };
@@ -14,6 +15,7 @@ function weaponDesc(id: WeaponId): string {
   const w = WEAPONS[id];
   const aps = (1000 / w.cooldownMs).toFixed(1);
   if (w.shield) return `Blocks melee & knockback. Slows you while raised.`;
+  if (w.ranged) return `Ranged arrow âˆ™ ${w.damage} dmg âˆ™ range ${w.range.toFixed(0)}`;
   return `Dmg ${w.damage} · ${aps} hits/s · range ${w.range.toFixed(1)}${w.breakMult > 1.2 ? ` · mines x${w.breakMult}` : ''}`;
 }
 
