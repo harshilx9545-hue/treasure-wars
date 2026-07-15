@@ -87,7 +87,6 @@ const spawns = generateMap(world);
 const atlas = createAtlas();
 const worldRenderer = new WorldRenderer(scene, world, atlas);
 worldRenderer.markAllDirty();
-worldRenderer.update(Infinity);
 
 // Treasure chests replace the beds visually (gameplay logic unchanged).
 let treasure = new Treasure(scene, world);
@@ -102,7 +101,6 @@ function resetLocalWorld(): void {
   world.data.fill(0);
   generateMap(world);
   worldRenderer.markAllDirty();
-  worldRenderer.update(Infinity);
   treasure.dispose();
   treasure = new Treasure(scene, world);
 }
@@ -183,9 +181,14 @@ let fps = 0;
 let fpsTimer = 0;
 
 const rayDir = new THREE.Vector3();
+const eventPos = new THREE.Vector3();
 
 const powerCooldownUntil = new Map<number, number>();
 const localEffects = new Map<number, number>();
+const effectSnapshot = new Map<number, number>();
+const frameMods: StepMods & { hasteMult: number } = { speedMult: 1, jumpMult: 1, hasteMult: 1 };
+const powerupViews: PowerUpView[] = ALL_POWERUPS.map((p) => ({ name: p.name, color: `#${p.color.toString(16).padStart(6, '0')}`, activeFrac: 0, cooldownFrac: 0, active: false }));
+let nextRemoteSyncAt = 0;
 
 // Offline/practice economy — a local mirror of a player + team so the shop,
 // coins, inventory and purchases all function without a server.
@@ -323,14 +326,17 @@ input.onHotbar = (i) => selectSlot(i);
 
 // ------- Power-ups -------
 function currentEffects(now: number): Map<number, number> {
-  const out = new Map<number, number>();
+  effectSnapshot.clear();
   if (offline) {
-    for (const [k, exp] of [...localEffects]) { if (exp <= now) localEffects.delete(k); else out.set(k, exp); }
-    return out;
+    localEffects.forEach((exp, key) => {
+      if (exp <= now) localEffects.delete(key);
+      else effectSnapshot.set(key, exp);
+    });
+    return effectSnapshot;
   }
   const me = getMe();
-  if (me?.effects) me.effects.forEach((exp: number, key: string) => { if (exp > now) out.set(Number(key), exp); });
-  return out;
+  if (me?.effects) me.effects.forEach((exp: number, key: string) => { if (exp > now) effectSnapshot.set(Number(key), exp); });
+  return effectSnapshot;
 }
 function currentMods(now: number): StepMods & { hasteMult: number } {
   const eff = currentEffects(now);
@@ -340,7 +346,10 @@ function currentMods(now: number): StepMods & { hasteMult: number } {
     if (!def) return;
     speedMult *= def.speedMult; jumpMult *= def.jumpMult; hasteMult *= def.hasteMult;
   });
-  return { speedMult, jumpMult, hasteMult };
+  frameMods.speedMult = speedMult;
+  frameMods.jumpMult = jumpMult;
+  frameMods.hasteMult = hasteMult;
+  return frameMods;
 }
 
 function localSpawn(team: number): void {
@@ -423,22 +432,12 @@ function buyWeaponLocal(w: WeaponId, charge: (c: number) => boolean, notice: (t:
 
 // ------- Attack targeting -------
 function findAttackTarget(): string | null {
-  const positions = remotes.positions();
-  let best: string | null = null;
   const weapon = activeWeaponDef();
-  let bestDist = (weapon?.range ?? ATTACK_REACH) + 0.8;
-  for (const p of positions) {
-    const dx = p.x - camera.position.x;
-    const dy = p.y + 1.0 - camera.position.y;
-    const dz = p.z - camera.position.z;
-    const dist = Math.hypot(dx, dy, dz);
-    if (dist > bestDist) continue;
-    const dot = (dx * rayDir.x + dy * rayDir.y + dz * rayDir.z) / (dist || 1);
-    if (dot < 0.94) continue;
-    best = p.id;
-    bestDist = dist;
-  }
-  return best;
+  return remotes.findTarget(
+    camera.position.x, camera.position.y, camera.position.z,
+    rayDir.x, rayDir.y, rayDir.z,
+    (weapon?.range ?? ATTACK_REACH) + 0.8,
+  );
 }
 
 // ------- Input handlers -------
@@ -632,7 +631,7 @@ function attachRoomHandlers(r: Room): void {
   r.onMessage(Msg.Explosion, (e: ExplosionEvent) => {
     audio.play('bed');
     particles.dust(e.x, e.y, e.z, e.kind === 'fireball' ? 0xff7a1a : 0xff5533, 60);
-    const d = camera.position.distanceTo(new THREE.Vector3(e.x, e.y, e.z));
+    const d = camera.position.distanceTo(eventPos.set(e.x, e.y, e.z));
     if (d < e.radius * 3) shake = Math.max(shake, 0.4 * (1 - d / (e.radius * 3)));
   });
   r.onMessage(Msg.Teleport, (t: TeleportEvent) => {
@@ -749,16 +748,18 @@ function frame(now: number): void {
   // Cinematic objective popup: fire once the player is actually in the match
   // (past the click-to-play splash). Purely visual — never pauses the game.
   if (play && !ended && !menu.visible) objective.play();
-  let me: any = null;
+  let me: any = room ? (room.state as any)?.players?.get(myId) ?? null : null;
   const players = room ? (room.state as any)?.players : null;
 
-  // Keep player avatars synced while playing AND during the frozen end screen.
-  if ((play || ended) && room && players) {
+  // Colyseus state advances at 20 Hz. Re-copying every player into render
+  // targets on each display frame was redundant and allocated a Set per frame;
+  // interpolation still runs every frame below.
+  if ((play || ended) && room && players && now >= nextRemoteSyncAt) {
+    nextRemoteSyncAt = now + TICK_MS;
     const seen = new Set<string>();
     players.forEach((p: any, id: string) => {
       seen.add(id);
       if (id === myId) {
-        me = p;
         if (!spawned && play) { localSpawn(p.team); phys.x = p.x; phys.y = p.y; phys.z = p.z; }
         return;
       }
@@ -879,10 +880,12 @@ function frame(now: number): void {
     // The shop is always reachable via E while alive — show the prompt.
     hud.setShopHint(alive && !shop.isOpen);
 
-    // Targeting + mining
+    // Targeting and mining only matter while pointer-locked. Avoid even the
+    // voxel raycast/remote target query while overlays own input.
     camera.getWorldDirection(rayDir);
-    const hit = alive ? raycastVoxel(camera.position.x, camera.position.y, camera.position.z, rayDir.x, rayDir.y, rayDir.z, REACH, world.isSolid) : null;
-    const attackTarget = alive ? findAttackTarget() : null;
+    const interactionActive = alive && input.locked && !shop.isOpen;
+    const hit = interactionActive ? raycastVoxel(camera.position.x, camera.position.y, camera.position.z, rayDir.x, rayDir.y, rayDir.z, REACH, world.isSolid) : null;
+    const attackTarget = interactionActive ? findAttackTarget() : null;
     const slot = HOTBAR[activeSlot];
 
     if (hit) {
@@ -944,18 +947,18 @@ function frame(now: number): void {
     hud.update(dt);
 
     const eff = currentEffects(epochNow);
-    const puViews: PowerUpView[] = ALL_POWERUPS.map((p) => {
+    for (let i = 0; i < ALL_POWERUPS.length; i++) {
+      const p = ALL_POWERUPS[i]!;
+      const view = powerupViews[i]!;
       const exp = eff.get(p.id);
       const active = exp !== undefined && exp > epochNow;
       const readyAt = powerCooldownUntil.get(p.id) ?? 0;
       const cooldownFrac = !active && readyAt > epochNow ? Math.min(1, (readyAt - epochNow) / p.cooldownMs) : 0;
-      return {
-        name: p.name, color: `#${p.color.toString(16).padStart(6, '0')}`,
-        activeFrac: active ? Math.max(0, (exp! - epochNow) / p.durationMs) : 0,
-        cooldownFrac, active,
-      };
-    });
-    hud.setPowerups(puViews);
+      view.active = active;
+      view.activeFrac = active ? Math.max(0, (exp! - epochNow) / p.durationMs) : 0;
+      view.cooldownFrac = cooldownFrac;
+    }
+    hud.setPowerups(powerupViews);
 
     // Kill counter (local player).
     hud.setKills(me ? me.kills : 0, me ? me.deaths : 0, me ? me.assists : 0);

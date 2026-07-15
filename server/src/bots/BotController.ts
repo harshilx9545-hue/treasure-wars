@@ -84,6 +84,9 @@ interface Brain {
   goalPoint: Point | null;
   path: PathNode[];
   pathIndex: number;
+  plannedX: number;
+  plannedY: number;
+  plannedZ: number;
   lastX: number;
   lastZ: number;
   stuckTicks: number;
@@ -91,6 +94,7 @@ interface Brain {
 }
 
 const ROLE_ORDER = [WeaponId.IronSword, WeaponId.Spear, WeaponId.Axe, WeaponId.Bow, WeaponId.Shield];
+const PATH_DIRS: ReadonlyArray<readonly [number, number]> = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]];
 
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
 const sqr = (v: number) => v * v;
@@ -133,6 +137,7 @@ class MinHeap<T> {
  */
 export class BotController {
   private brains = new Map<string, Brain>();
+  private playerSnapshot: Array<[string, BotPlayerView]> = [];
 
   constructor(private readonly runtime: BotRuntime) {}
 
@@ -142,7 +147,8 @@ export class BotController {
       id, difficulty, role: ROLE_ORDER[seed % ROLE_ORDER.length]!, seq: 1,
       yaw: p?.yaw ?? 0, nextThink: 0, nextReplan: 0, nextAttack: 0, nextBreak: 0, nextLook: 0,
       blockUntil: 0, forcedTarget: null, target: null, goal: 'wander', goalPoint: null,
-      path: [], pathIndex: 0, lastX: p?.x ?? 0, lastZ: p?.z ?? 0, stuckTicks: 0, wander: null,
+      path: [], pathIndex: 0, plannedX: Number.NaN, plannedY: Number.NaN, plannedZ: Number.NaN,
+      lastX: p?.x ?? 0, lastZ: p?.z ?? 0, stuckTicks: 0, wander: null,
     });
   }
 
@@ -157,6 +163,9 @@ export class BotController {
   }
 
   tick(now: number): void {
+    // One immutable-in-practice snapshot per server tick replaces a separate
+    // state-array allocation for every bot decision.
+    this.playerSnapshot = this.runtime.players();
     for (const brain of this.brains.values()) {
       const p = this.runtime.getPlayer(brain.id);
       const phys = this.runtime.getPhysics(brain.id);
@@ -165,14 +174,13 @@ export class BotController {
 
       if (now >= brain.nextThink) {
         brain.nextThink = now + spec.thinkMs;
-        this.decide(brain, p, phys, now, spec);
+        this.decide(brain, p, phys, now, spec, this.playerSnapshot);
       }
       this.move(brain, p, phys, now, spec);
     }
   }
 
-  private decide(brain: Brain, p: BotPlayerView, phys: PlayerPhysics, now: number, spec: DifficultySpec): void {
-    const players = this.runtime.players();
+  private decide(brain: Brain, p: BotPlayerView, phys: PlayerPhysics, now: number, spec: DifficultySpec, players: Array<[string, BotPlayerView]>): void {
     const ownTreasure = this.runtime.treasures[p.team] ?? this.runtime.spawns[p.team]!;
     const enemyNearBase = this.nearestEnemy(p, ownTreasure, 25, players);
     const forced = brain.forcedTarget ? this.runtime.getPlayer(brain.forcedTarget) : undefined;
@@ -218,10 +226,16 @@ export class BotController {
     if (p.weapon !== desired) this.runtime.equip(brain.id, desired);
     this.runtime.block(brain.id, desired === WeaponId.Shield && now < brain.blockUntil);
 
-    if (brain.goalPoint && (now >= brain.nextReplan || brain.path.length === 0 || brain.goal === 'combat' || brain.goal === 'defend')) {
+    const goalMoved = !!brain.goalPoint && (
+      sqr(brain.goalPoint.x - brain.plannedX) + sqr(brain.goalPoint.y - brain.plannedY) + sqr(brain.goalPoint.z - brain.plannedZ) > 2.25
+    );
+    if (brain.goalPoint && (now >= brain.nextReplan || brain.path.length === 0 || goalMoved)) {
       brain.nextReplan = now + spec.replanMs;
       brain.path = this.plan(p, brain.goalPoint, spec.maxNodes);
       brain.pathIndex = Math.min(1, Math.max(0, brain.path.length - 1));
+      brain.plannedX = brain.goalPoint.x;
+      brain.plannedY = brain.goalPoint.y;
+      brain.plannedZ = brain.goalPoint.z;
     }
 
     if (target) this.tryCombat(brain, p, target, now, spec);
@@ -352,33 +366,32 @@ export class BotController {
     const goal = this.nearestWalkCell(Math.floor(to.x), Math.floor(to.z), to.y);
     if (!start || !goal) return [];
     if (this.directWalkable(start, goal)) return [start, goal];
-    const key = (x: number, z: number) => `${x}:${z}`;
     const open = new MinHeap<PathNode>();
-    const came = new Map<string, string>();
-    const nodes = new Map<string, PathNode>();
-    const g = new Map<string, number>();
-    const sk = key(start.gx, start.gz); const goalKey = key(goal.gx, goal.gz);
+    const came = new Map<number, number>();
+    const nodes = new Map<number, PathNode>();
+    const g = new Map<number, number>();
+    const sk = start.gz * WORLD_X + start.gx;
+    const goalKey = goal.gz * WORLD_X + goal.gx;
     nodes.set(sk, start); g.set(sk, 0); open.push(start, Math.hypot(goal.gx - start.gx, goal.gz - start.gz));
-    let visited = 0; let found = '';
-    const dirs = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]];
+    let visited = 0; let found = -1;
     while (open.length && visited++ < maxNodes) {
-      const cur = open.pop()!; const ck = key(cur.gx, cur.gz);
+      const cur = open.pop()!; const ck = cur.gz * WORLD_X + cur.gx;
       if (ck === goalKey) { found = ck; break; }
       const cg = g.get(ck) ?? Infinity;
-      for (const [dx, dz] of dirs) {
+      for (const [dx, dz] of PATH_DIRS) {
         const next = this.walkCell(cur.gx + dx, cur.gz + dz, cur.y);
         if (!next || Math.abs(next.y - cur.y) > 1.05) continue;
         // No diagonal corner-cutting through a wall.
         if (dx && dz && (!this.walkCell(cur.gx + dx, cur.gz, cur.y) || !this.walkCell(cur.gx, cur.gz + dz, cur.y))) continue;
-        const nk = key(next.gx, next.gz); const ng = cg + (dx && dz ? 1.414 : 1) + Math.abs(next.y - cur.y) * 0.35;
+        const nk = next.gz * WORLD_X + next.gx; const ng = cg + (dx && dz ? 1.414 : 1) + Math.abs(next.y - cur.y) * 0.35;
         if (ng >= (g.get(nk) ?? Infinity)) continue;
         g.set(nk, ng); came.set(nk, ck); nodes.set(nk, next);
         open.push(next, ng + Math.hypot(goal.gx - next.gx, goal.gz - next.gz));
       }
     }
-    if (!found) return [];
+    if (found < 0) return [];
     const out: PathNode[] = [];
-    for (let at = found; at;) { const n = nodes.get(at); if (!n) break; out.push(n); at = came.get(at) ?? ''; }
+    for (let at = found; at >= 0;) { const n = nodes.get(at); if (!n) break; out.push(n); at = came.get(at) ?? -1; }
     return out.reverse();
   }
 

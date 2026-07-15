@@ -59,6 +59,7 @@ interface Entry {
   held: THREE.Object3D | null;
   heldWeapon: number;
   label: THREE.Sprite | null;
+  ring: THREE.Mesh | null;
 }
 
 /** Build a team-colored name label sprite (canvas texture, always faces camera). */
@@ -130,6 +131,7 @@ export class RemotePlayers {
       fresh: true, visible: true, hitFlash: 0,
       root: null, mixer: null, actions: {}, current: '', attackT: 0, mats: [],
       bone: null, held: null, heldWeapon: -1, label: null,
+      ring: null,
     };
     this.active.set(id, e);
     if (this.loaded) this.build(id, e);
@@ -171,6 +173,7 @@ export class RemotePlayers {
     ring.rotation.x = -Math.PI / 2;
     ring.position.y = 0.03;
     root.add(ring);
+    e.ring = ring;
 
     // Team-colored name label above the head.
     const label = makeLabel(e.name || TEAMS[e.team].name, teamColor);
@@ -229,7 +232,10 @@ export class RemotePlayers {
 
   private setLabel(e: Entry): void {
     if (!e.root) return;
-    if (e.label) e.root.remove(e.label);
+    if (e.label) {
+      e.root.remove(e.label);
+      this.disposeLabel(e.label);
+    }
     const label = makeLabel(e.name || TEAMS[e.team].name, TEAMS[e.team % TEAMS.length].color);
     label.position.y = 2.25;
     e.root.add(label);
@@ -274,8 +280,19 @@ export class RemotePlayers {
     if (!e) return;
     if (e.root) this.scene.remove(e.root);
     e.mixer?.stopAllAction();
+    if (e.label) this.disposeLabel(e.label);
+    if (e.ring) {
+      e.ring.geometry.dispose();
+      (e.ring.material as THREE.Material).dispose();
+    }
     for (const m of e.mats) m.dispose();
     this.active.delete(id);
+  }
+
+  private disposeLabel(label: THREE.Sprite): void {
+    const mat = label.material as THREE.SpriteMaterial;
+    mat.map?.dispose();
+    mat.dispose();
   }
 
   prune(seen: Set<string>): void {
@@ -284,18 +301,27 @@ export class RemotePlayers {
     }
   }
 
-  positions(): RemotePos[] {
-    const out: RemotePos[] = [];
-    this.active.forEach((e, id) => { if (e.visible) out.push({ id, x: e.tx, y: e.ty, z: e.tz }); });
-    return out;
+  /** Allocation-free target query used by the per-frame combat reticle. */
+  findTarget(ox: number, oy: number, oz: number, dx: number, dy: number, dz: number, maxDist: number): string | null {
+    let best: string | null = null;
+    let bestDist = maxDist;
+    this.active.forEach((e, id) => {
+      if (!e.visible) return;
+      const px = e.tx - ox;
+      const py = e.ty + 1 - oy;
+      const pz = e.tz - oz;
+      const dist = Math.hypot(px, py, pz);
+      if (dist > bestDist) return;
+      if ((px * dx + py * dy + pz * dz) / (dist || 1) < 0.94) return;
+      best = id;
+      bestDist = dist;
+    });
+    return best;
   }
 
   update(dt: number): void {
     const k = 1 - Math.exp(-12 * dt);
     this.active.forEach((e) => {
-      e.mixer?.update(dt);
-      // Attach a queued weapon once the weapon models finish loading.
-      if (e.bone && e.held === null && weaponModels.ready) this.attachWeapon(e, e.weapon);
       const root = e.root;
       if (!root) return;
 
@@ -310,10 +336,18 @@ export class RemotePlayers {
       const dz = root.position.z - e.pz;
       e.px = root.position.x;
       e.pz = root.position.z;
+      // Invisible/dead avatars cannot contribute pixels, so their animation
+      // mixer is paused until they become visible again. Visible animations
+      // continue at full rate and with the exact same clips/blending.
+      if (e.visible) {
+        e.mixer?.update(dt);
+        // Attach a queued weapon once the weapon models finish loading.
+        if (e.bone && e.held === null && weaponModels.ready) this.attachWeapon(e, e.weapon);
+      }
       // While an attack swing is playing, don't override it with locomotion.
       if (e.attackT > 0) {
         e.attackT -= dt;
-      } else {
+      } else if (e.visible) {
         const speed = Math.hypot(dx, dz) / Math.max(dt, 1e-3);
         this.setAction(e, speed > RUN_SPEED ? 'Run' : speed > WALK_SPEED ? 'Walk' : 'Idle');
       }

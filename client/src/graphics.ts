@@ -59,6 +59,10 @@ export function initGraphics(
   camera: THREE.PerspectiveCamera,
 ): Graphics {
   renderer.shadowMap.enabled = true;
+  // Shadow quality is unchanged. We explicitly refresh the map at 20 Hz and
+  // whenever its camera anchor changes, rather than re-rendering a 2048² map
+  // on every display frame (the main GPU frame-time spike in a busy arena).
+  renderer.shadowMap.autoUpdate = false;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.05;
@@ -98,6 +102,13 @@ export function initGraphics(
   let bloomOn = true;
   let lastGQ = '';
   let lastSQ = '';
+  let nextShadowUpdateAt = 0;
+  let shadowAnchorX = Number.NaN;
+  let shadowAnchorZ = Number.NaN;
+  const requestShadowUpdate = (): void => {
+    sun.shadow.needsUpdate = true;
+    renderer.shadowMap.needsUpdate = true;
+  };
   settings.subscribe((s) => {
     // Graphics quality -> bloom strength + device pixel ratio (guarded so slider
     // drags of unrelated settings don't rebuild the framebuffer every emit).
@@ -120,6 +131,7 @@ export function initGraphics(
         sun.shadow.map?.dispose();
         (sun.shadow as any).map = null; // force a rebuild at the new resolution
       }
+      if (shOn) requestShadowUpdate();
     }
   });
 
@@ -133,11 +145,26 @@ export function initGraphics(
       bloom.setSize(w, h);
     },
     update(camPos: THREE.Vector3): void {
-      // Keep the sky dome centered on the player and the shadow-casting sun
-      // anchored above them so shadows follow the action.
+      // Keep the sky dome centered on the player. The directional-light vector
+      // is translation invariant, so snapping the shadow camera to 4-unit
+      // anchors preserves lighting while avoiding a complete shadow redraw for
+      // sub-pixel camera movement.
       sky.position.copy(camPos);
-      sun.target.position.copy(camPos);
-      sun.position.copy(camPos).addScaledVector(SUN_DIR, 90);
+      const x = Math.round(camPos.x * 0.25) * 4;
+      const z = Math.round(camPos.z * 0.25) * 4;
+      const now = performance.now();
+      if (x !== shadowAnchorX || z !== shadowAnchorZ) {
+        shadowAnchorX = x; shadowAnchorZ = z;
+        sun.target.position.set(x, camPos.y, z);
+        sun.position.copy(sun.target.position).addScaledVector(SUN_DIR, 90);
+        requestShadowUpdate();
+      }
+      // Moving players/props remain shadowed at 20 Hz, which is visually
+      // smooth while removing redundant shadow-map work on high-refresh panels.
+      if (now >= nextShadowUpdateAt) {
+        nextShadowUpdateAt = now + 50;
+        requestShadowUpdate();
+      }
     },
     applyRenderDistance(chunks: number): void {
       const far = Math.max(60, chunks * 16);

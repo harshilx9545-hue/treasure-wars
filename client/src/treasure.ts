@@ -86,15 +86,41 @@ export class Treasure {
   destroy(team: number): void {
     const c = this.chests.get(team);
     if (!c) return;
+    this.removeGems(c);
     c.parent?.remove(c);
+    this.disposeObject(c);
     this.chests.delete(team);
   }
 
   /** Remove every chest (used when the world is rebuilt for a rematch). */
   dispose(): void {
-    this.chests.forEach((c) => c.parent?.remove(c));
+    this.chests.forEach((c) => {
+      this.removeGems(c);
+      c.parent?.remove(c);
+      this.disposeObject(c);
+    });
     this.chests.clear();
     this.gems.length = 0;
+  }
+
+  private removeGems(root: THREE.Object3D): void {
+    this.gems = this.gems.filter((gem) => gem.parent !== root);
+  }
+
+  /** Chests are rebuilt on rematch, so release their procedural GPU resources. */
+  private disposeObject(root: THREE.Object3D): void {
+    const geometries = new Set<THREE.BufferGeometry>();
+    const materials = new Set<THREE.Material>();
+    root.traverse((o) => {
+      const mesh = o as THREE.Mesh;
+      if (!(mesh as any).isMesh) return;
+      geometries.add(mesh.geometry);
+      const source = mesh.material;
+      if (Array.isArray(source)) for (const m of source) materials.add(m);
+      else materials.add(source);
+    });
+    geometries.forEach((geo) => geo.dispose());
+    materials.forEach((mat) => mat.dispose());
   }
 
   /** Optional idle polish — gently spin the gems. */

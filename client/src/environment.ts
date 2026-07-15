@@ -15,6 +15,7 @@ const TREE_URLS: string[] = Object.entries(
 
 const TREE_COUNT = 55;        // same population as the previous palms
 const TREE_TARGET_H = 5.2;    // normalized trunk-to-canopy height (world units)
+const INSTANCE_CELL = 48;     // static-instance culling cell (three map chunks)
 
 /**
  * Shared low-poly color atlas for the trees ("tree Textures/"). Every temp-
@@ -123,14 +124,32 @@ export class Environment {
     return this.world.get(x, BASE_Y, z) === BlockType.Grass && this.world.get(x, BASE_Y + 1, z) === BlockType.Air;
   }
 
-  private buildInstanced(scene: THREE.Scene, geo: THREE.BufferGeometry, mat: THREE.Material, transforms: THREE.Matrix4[]): void {
+  /**
+   * Split static instances into compact spatial cells. One giant instance
+   * range has a world-sized bounding sphere and therefore cannot be frustum
+   * culled; cells keep batching while letting Three.js reject unseen islands.
+   */
+  private buildInstanced(scene: THREE.Scene, geo: THREE.BufferGeometry, mat: THREE.Material, transforms: THREE.Matrix4[], receiveShadow = false): void {
     if (transforms.length === 0) return;
-    const inst = new THREE.InstancedMesh(geo, mat, transforms.length);
-    inst.castShadow = true;
-    for (let i = 0; i < transforms.length; i++) inst.setMatrixAt(i, transforms[i]);
-    inst.instanceMatrix.needsUpdate = true;
-    inst.frustumCulled = false;
-    scene.add(inst);
+    const cells = new Map<string, THREE.Matrix4[]>();
+    for (const matrix of transforms) {
+      const e = matrix.elements;
+      const key = `${Math.floor(e[12] / INSTANCE_CELL)},${Math.floor(e[14] / INSTANCE_CELL)}`;
+      let cell = cells.get(key);
+      if (!cell) { cell = []; cells.set(key, cell); }
+      cell.push(matrix);
+    }
+    for (const transformsInCell of cells.values()) {
+      const inst = new THREE.InstancedMesh(geo, mat, transformsInCell.length);
+      inst.castShadow = true;
+      inst.receiveShadow = receiveShadow;
+      inst.instanceMatrix.setUsage(THREE.StaticDrawUsage);
+      for (let i = 0; i < transformsInCell.length; i++) inst.setMatrixAt(i, transformsInCell[i]!);
+      inst.instanceMatrix.needsUpdate = true;
+      inst.computeBoundingSphere();
+      inst.frustumCulled = true;
+      scene.add(inst);
+    }
   }
 
   // --- Trees (FBX models, instanced) scattered on open grass ---
@@ -209,20 +228,16 @@ export class Environment {
     // All variants sample the same shared color atlas through their UVs.
     const mat = getTreeMaterial();
     for (const geo of geos) {
-      const inst = new THREE.InstancedMesh(geo, mat, placements.length);
-      inst.castShadow = true;
-      inst.receiveShadow = true;
+      const transforms: THREE.Matrix4[] = [];
       for (let i = 0; i < placements.length; i++) {
         const p = placements[i];
         DUMMY.position.set(p.x, BASE_Y + 1, p.z);
         DUMMY.rotation.set(0, p.yaw, 0);
         DUMMY.scale.setScalar(p.scale);
         DUMMY.updateMatrix();
-        inst.setMatrixAt(i, DUMMY.matrix);
+        transforms.push(DUMMY.matrix.clone());
       }
-      inst.instanceMatrix.needsUpdate = true;
-      inst.frustumCulled = false;
-      scene.add(inst);
+      this.buildInstanced(scene, geo, mat, transforms, true);
     }
   }
 
