@@ -198,5 +198,10 @@ export class ViewModel {
 
     holder.position.set(px, py, pz);
     holder.rotation.set(rx, ry, rz, 'XYZ');
+    if (this.mode === 'weapon' && (this.currentCategory === 'axe' || this.currentCategory === 'doubleAxe')) {
+      // Twist around the handle's local axis so the cutting edge points toward
+      // camera-forward (-Z), without changing grip, position, scale, or motion.
+      holder.rotateY(Math.PI / 2);
+    }
   }
 }
