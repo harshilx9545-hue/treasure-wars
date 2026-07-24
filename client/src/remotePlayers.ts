@@ -1,37 +1,7 @@
 import * as THREE from 'three';
-import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
-import { clone as skeletonClone } from 'three/examples/jsm/utils/SkeletonUtils.js';
-import { TEAMS, WeaponId } from '@bedwars/shared';
-import { weaponModels } from './weaponModels';
-import warriorUrl from '../../glTF/Warrior.gltf?url';
-
-const TARGET_HEIGHT = 1.85;
-const MODEL_YAW_OFFSET = Math.PI;
-const RUN_SPEED = 9;
-const WALK_SPEED = 0.7;
-const WEAPON_BONE = 'Weapon.R';
-const BUILTIN_WEAPON_MESH = 'Warrior_Sword';
-
-/**
- * Resolve a node by its authored glTF name. three.js's GLTFLoader runs every
- * node name through PropertyBinding.sanitizeNodeName, which strips reserved
- * characters ("[ ] . : /") — so a bone authored as "Weapon.R" is loaded into
- * the scene graph as "WeaponR" (the original is kept only in userData.name).
- * We therefore match against the sanitized name first (what getObjectByName
- * actually sees), then fall back to the raw name and a userData.name scan so
- * the lookup is robust across models and future three.js versions.
- */
-function findNode(root: THREE.Object3D, authoredName: string): THREE.Object3D | null {
-  const sanitized = THREE.PropertyBinding.sanitizeNodeName(authoredName);
-  const direct = root.getObjectByName(sanitized) ?? root.getObjectByName(authoredName);
-  if (direct) return direct;
-  let match: THREE.Object3D | null = null;
-  root.traverse((o) => {
-    if (match) return;
-    if (o.userData?.name === authoredName || o.name === sanitized || o.name === authoredName) match = o;
-  });
-  return match;
-}
+import { PLAYER_HALF_W, PLAYER_HEIGHT, TEAMS, WeaponId } from '@bedwars/shared';
+import { AnimationController, pirateAnimationLibrary } from './animationController';
+import { type WeaponMotion, weaponModels } from './weaponModels';
 
 export interface RemotePos {
   id: string;
@@ -40,32 +10,124 @@ export interface RemotePos {
   z: number;
 }
 
+interface SharedFlashMaterial {
+  material: THREE.MeshStandardMaterial;
+  emissive: THREE.Color;
+  emissiveIntensity: number;
+}
+
+const sharedFlashMaterials = new WeakMap<THREE.MeshStandardMaterial, SharedFlashMaterial>();
+
+function rayAabbDistance(
+  ox: number, oy: number, oz: number,
+  dx: number, dy: number, dz: number,
+  minX: number, minY: number, minZ: number,
+  maxX: number, maxY: number, maxZ: number,
+  maxDistance: number,
+): number | null {
+  let near = 0;
+  let far = maxDistance;
+
+  if (Math.abs(dx) < 1e-8) {
+    if (ox < minX || ox > maxX) return null;
+  } else {
+    let a = (minX - ox) / dx;
+    let b = (maxX - ox) / dx;
+    if (a > b) [a, b] = [b, a];
+    near = Math.max(near, a); far = Math.min(far, b);
+    if (near > far) return null;
+  }
+  if (Math.abs(dy) < 1e-8) {
+    if (oy < minY || oy > maxY) return null;
+  } else {
+    let a = (minY - oy) / dy;
+    let b = (maxY - oy) / dy;
+    if (a > b) [a, b] = [b, a];
+    near = Math.max(near, a); far = Math.min(far, b);
+    if (near > far) return null;
+  }
+  if (Math.abs(dz) < 1e-8) {
+    if (oz < minZ || oz > maxZ) return null;
+  } else {
+    let a = (minZ - oz) / dz;
+    let b = (maxZ - oz) / dz;
+    if (a > b) [a, b] = [b, a];
+    near = Math.max(near, a); far = Math.min(far, b);
+    if (near > far) return null;
+  }
+  return near <= maxDistance && far >= 0 ? Math.max(0, near) : null;
+}
+
 interface Entry {
   team: number;
   name: string;
-  weapon: number;
-  tx: number; ty: number; tz: number; tyaw: number;
-  px: number; pz: number;
+  weaponState: number;
+  tx: number;
+  ty: number;
+  tz: number;
+  tyaw: number;
+  tvx: number;
+  tvy: number;
+  tvz: number;
+  px: number;
+  pz: number;
   fresh: boolean;
-  visible: boolean;
+  alive: boolean;
+  grounded: boolean;
+  deathT: number;
   hitFlash: number;
   root: THREE.Group | null;
-  mixer: THREE.AnimationMixer | null;
-  actions: Record<string, THREE.AnimationAction>;
-  current: string;
-  attackT: number; // >0 while an attack clip is playing (overrides locomotion)
-  mats: THREE.MeshStandardMaterial[];
-  bone: THREE.Object3D | null;
-  held: THREE.Object3D | null;
-  heldWeapon: number;
+  controller: AnimationController | null;
+  weaponAnchor: THREE.Object3D | null;
+  heldWeapon: THREE.Object3D | null;
+  heldWeaponState: number;
+  weaponAttackElapsed: number;
+  weaponAttackDuration: number;
+  weaponAttackMotion: WeaponMotion | null;
   label: THREE.Sprite | null;
   ring: THREE.Mesh | null;
+}
+
+/** Flash one avatar while preserving cache-owned materials for every other player. */
+function installSharedMaterialFlash(mesh: THREE.Mesh, entry: Entry): void {
+  const materials = (Array.isArray(mesh.material) ? mesh.material : [mesh.material])
+    .filter((material): material is THREE.MeshStandardMaterial => (material as THREE.MeshStandardMaterial).isMeshStandardMaterial)
+    .map((material) => {
+      let state = sharedFlashMaterials.get(material);
+      if (!state) {
+        state = {
+          material,
+          emissive: material.emissive.clone(),
+          emissiveIntensity: material.emissiveIntensity,
+        };
+        sharedFlashMaterials.set(material, state);
+      }
+      return state;
+    });
+  let flashing = false;
+  mesh.onBeforeRender = () => {
+    if (entry.hitFlash <= 0) return;
+    flashing = true;
+    for (const state of materials) {
+      state.material.emissive.setHex(0xff3333);
+      state.material.emissiveIntensity = 0.9;
+    }
+  };
+  mesh.onAfterRender = () => {
+    if (!flashing) return;
+    flashing = false;
+    for (const state of materials) {
+      state.material.emissive.copy(state.emissive);
+      state.material.emissiveIntensity = state.emissiveIntensity;
+    }
+  };
 }
 
 /** Build a team-colored name label sprite (canvas texture, always faces camera). */
 function makeLabel(name: string, colorHex: number): THREE.Sprite {
   const canvas = document.createElement('canvas');
-  canvas.width = 256; canvas.height = 64;
+  canvas.width = 256;
+  canvas.height = 64;
   const ctx = canvas.getContext('2d')!;
   ctx.clearRect(0, 0, 256, 64);
   ctx.font = 'bold 34px Segoe UI, sans-serif';
@@ -85,39 +147,29 @@ function makeLabel(name: string, colorHex: number): THREE.Sprite {
 }
 
 /**
- * Remote (third-person) player avatars: Warrior glTF, cloned per player with
- * an independent skeleton + mixer. Each holds its active weapon on the
- * Weapon.R bone, wears a team-colored feet ring + emissive tint, and shows a
- * team-colored name label. Purely visual; movement/combat stay server-side.
+ * Remote avatars use the seven approved Pirate Kit characters. Models and
+ * semantic clips are loaded once, while every player owns an independent
+ * skeleton, AnimationMixer, state machine, and exact RightHand attachment.
+ * Movement and combat remain driven entirely by existing replicated state.
  */
 export class RemotePlayers {
-  private scene: THREE.Scene;
-  private active = new Map<string, Entry>();
-  private template: THREE.Object3D | null = null;
-  private clips: THREE.AnimationClip[] = [];
-  private scaleFactor = 1;
-  private yOffset = 0;
+  private readonly active = new Map<string, Entry>();
   private loaded = false;
+  private celebratingTeam = -1;
 
-  constructor(scene: THREE.Scene) {
-    this.scene = scene;
-    weaponModels.load();
-    new GLTFLoader().load(
-      warriorUrl,
-      (gltf) => {
-        this.template = gltf.scene;
-        this.clips = gltf.animations;
-        const box = new THREE.Box3().setFromObject(gltf.scene);
-        const size = new THREE.Vector3();
-        box.getSize(size);
-        this.scaleFactor = TARGET_HEIGHT / (size.y || 1);
-        this.yOffset = -box.min.y * this.scaleFactor;
-        this.loaded = true;
-        this.active.forEach((e, id) => { if (!e.root) this.build(id, e); });
-      },
-      undefined,
-      (err) => console.error('[bedwars] failed to load Warrior model:', err),
-    );
+  constructor(private readonly scene: THREE.Scene) {
+    void weaponModels.load();
+    weaponModels.onReady(() => {
+      this.active.forEach((entry, id) => this.attachWeapon(id, entry, entry.weaponState));
+    });
+    pirateAnimationLibrary.load().then(() => {
+      this.loaded = true;
+      this.active.forEach((entry, id) => {
+        if (!entry.root && this.active.get(id) === entry) this.build(id, entry);
+      });
+    }).catch((error) => {
+      console.error('[bedwars] failed to load Pirate Kit avatars:', error);
+    });
   }
 
   has(id: string): boolean {
@@ -125,174 +177,234 @@ export class RemotePlayers {
   }
 
   add(id: string, team: number): void {
-    const e: Entry = {
-      team, name: '', weapon: WeaponId.IronSword,
-      tx: 0, ty: 0, tz: 0, tyaw: 0, px: 0, pz: 0,
-      fresh: true, visible: true, hitFlash: 0,
-      root: null, mixer: null, actions: {}, current: '', attackT: 0, mats: [],
-      bone: null, held: null, heldWeapon: -1, label: null,
+    const entry: Entry = {
+      team,
+      name: '',
+      weaponState: WeaponId.Dagger,
+      tx: 0,
+      ty: 0,
+      tz: 0,
+      tyaw: 0,
+      tvx: 0,
+      tvy: 0,
+      tvz: 0,
+      px: 0,
+      pz: 0,
+      fresh: true,
+      alive: true,
+      grounded: true,
+      deathT: 0,
+      hitFlash: 0,
+      root: null,
+      controller: null,
+      weaponAnchor: null,
+      heldWeapon: null,
+      heldWeaponState: -1,
+      weaponAttackElapsed: 0,
+      weaponAttackDuration: 0,
+      weaponAttackMotion: null,
+      label: null,
       ring: null,
     };
-    this.active.set(id, e);
-    if (this.loaded) this.build(id, e);
+    this.active.set(id, entry);
+    if (this.loaded) this.build(id, entry);
   }
 
-  private build(_id: string, e: Entry): void {
-    if (!this.template) return;
-    const model = skeletonClone(this.template) as THREE.Object3D;
-    model.scale.setScalar(this.scaleFactor);
-    model.position.y = this.yOffset;
-    model.rotation.y = MODEL_YAW_OFFSET;
+  private build(id: string, entry: Entry): void {
+    if (!this.loaded || entry.root || this.active.get(id) !== entry) return;
+    const avatar = pirateAnimationLibrary.createAvatar(id, entry.team);
+    const model = avatar.model;
 
-    const teamColor = TEAMS[e.team % TEAMS.length].color;
-    model.traverse((o) => {
-      // Hide the character's built-in sword — we attach our own weapon.
-      if (o.name === BUILTIN_WEAPON_MESH) { o.visible = false; return; }
-      const mesh = o as THREE.Mesh;
-      if (!(mesh as any).isMesh) return;
-      mesh.castShadow = true;
-      const src = mesh.material;
-      const tint = (mat: THREE.Material): THREE.MeshStandardMaterial => {
-        const m = mat.clone() as THREE.MeshStandardMaterial;
-        if (m.emissive) { m.emissive = new THREE.Color(teamColor); m.emissiveIntensity = 0.3; }
-        e.mats.push(m);
-        return m;
-      };
-      mesh.material = Array.isArray(src) ? src.map(tint) : tint(src);
+    // Skeleton clones retain cache-owned geometry, textures and materials.
+    // Per-draw callbacks provide isolated hit flashes without material clones.
+    model.traverse((node) => {
+      const mesh = node as THREE.Mesh;
+      if (mesh.isMesh) installSharedMaterialFlash(mesh, entry);
     });
-    e.bone = findNode(model, WEAPON_BONE);
 
     const root = new THREE.Group();
+    root.name = `RemotePirate:${id}:${avatar.characterName}`;
     root.add(model);
 
-    // Team ring under the feet (Roblox-BedWars style).
+    const teamColor = TEAMS[entry.team % TEAMS.length].color;
     const ring = new THREE.Mesh(
       new THREE.RingGeometry(0.32, 0.55, 28),
-      new THREE.MeshBasicMaterial({ color: teamColor, transparent: true, opacity: 0.85, side: THREE.DoubleSide, depthWrite: false }),
+      new THREE.MeshBasicMaterial({
+        color: teamColor,
+        transparent: true,
+        opacity: 0.85,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+      }),
     );
     ring.rotation.x = -Math.PI / 2;
     ring.position.y = 0.03;
     root.add(ring);
-    e.ring = ring;
+    entry.ring = ring;
 
-    // Team-colored name label above the head.
-    const label = makeLabel(e.name || TEAMS[e.team].name, teamColor);
+    const label = makeLabel(entry.name || TEAMS[entry.team].name, teamColor);
     label.position.y = 2.25;
     root.add(label);
-    e.label = label;
+    entry.label = label;
 
-    root.position.set(e.tx, e.ty, e.tz);
-    root.rotation.y = e.tyaw;
-    root.visible = e.visible;
+    root.position.set(entry.tx, entry.ty, entry.tz);
+    root.rotation.y = entry.tyaw;
     this.scene.add(root);
-    e.root = root;
+    entry.root = root;
+    entry.controller = new AnimationController(model, avatar.animations);
+    entry.weaponAnchor = avatar.weaponAnchor;
+    this.attachWeapon(id, entry, entry.weaponState);
 
-    const mixer = new THREE.AnimationMixer(model);
-    e.mixer = mixer;
-    for (const name of ['Idle', 'Walk', 'Run']) {
-      const clip = THREE.AnimationClip.findByName(this.clips, name);
-      if (clip) e.actions[name] = mixer.clipAction(clip);
+    if (!avatar.weaponAnchor) {
+      console.warn(`[bedwars] ${avatar.characterName} has no exact RightHand node for the equipped weapon`);
     }
-    // Resolve a one-shot attack clip (first available) for melee swing sync.
-    for (const name of ['Sword_Attack', 'Sword_Attack2', 'Punch', 'Attack', 'Spell1']) {
-      const clip = THREE.AnimationClip.findByName(this.clips, name);
-      if (clip) { const a = mixer.clipAction(clip); a.setLoop(THREE.LoopOnce, 1); a.clampWhenFinished = false; e.actions.Attack = a; break; }
-    }
-    this.setAction(e, e.actions.Idle ? 'Idle' : Object.keys(e.actions)[0] ?? '');
-
-    this.attachWeapon(e, e.weapon);
+    if (!entry.alive) entry.deathT = entry.controller.triggerDeath();
+    root.visible = entry.alive || entry.deathT > 0;
+    label.visible = entry.alive;
+    ring.visible = entry.alive;
   }
 
-  private attachWeapon(e: Entry, weaponId: number): void {
-    if (!e.bone || !weaponModels.ready) return;
-    if (e.heldWeapon === weaponId && e.held) return;
-    if (e.held) { e.bone.remove(e.held); e.held = null; }
-    const model = weaponModels.buildHand(weaponId as WeaponId);
-    if (model) {
-      // Counter the character scale so the weapon keeps a consistent size.
-      model.scale.multiplyScalar(1 / this.scaleFactor);
-      e.bone.add(model);
-      e.held = model;
+  private attachWeapon(id: string, entry: Entry, weapon: number): void {
+    if (!entry.weaponAnchor || !weaponModels.ready) return;
+    const category = weaponModels.category(weapon as WeaponId);
+    if (entry.heldWeaponState === weapon && (entry.heldWeapon !== null || category === null)) return;
+
+    // Remove first so an unavailable/unsupported visual can never leave the
+    // previous weapon visible as a substitution or produce two held meshes.
+    if (entry.heldWeapon) {
+      entry.weaponAnchor.remove(entry.heldWeapon);
+      entry.heldWeapon = null;
     }
-    e.heldWeapon = weaponId;
+    entry.heldWeaponState = weapon;
+    entry.weaponAttackElapsed = 0;
+    entry.weaponAttackDuration = 0;
+    entry.weaponAttackMotion = null;
+
+    const held = weaponModels.buildHand(weapon as WeaponId, entry.weaponAnchor);
+    if (!held) {
+      if (category) console.warn('[bedwars] missing third-person Pirate weapon', { player: id, category });
+      return;
+    }
+    entry.weaponAnchor.add(held);
+    entry.heldWeapon = held;
   }
 
-  /** Play a one-shot attack/swing on the given player (server Hit event). */
+  /** Existing authoritative Hit events drive remote visual attack motion. */
   playAttack(id: string): void {
-    const e = this.active.get(id);
-    if (!e || !e.mixer) return;
-    const a = e.actions.Attack;
-    if (!a) return;
-    const prev = e.current ? e.actions[e.current] : null;
-    if (prev) prev.fadeOut(0.08);
-    a.reset().setEffectiveWeight(1).fadeIn(0.05).play();
-    e.current = ''; // force locomotion to re-blend once the swing finishes
-    e.attackT = Math.min(0.6, a.getClip().duration || 0.5);
+    const entry = this.active.get(id);
+    if (!entry) return;
+    const motion = weaponModels.motion(entry.weaponState as WeaponId);
+    if (!motion) return;
+    entry.weaponAttackMotion = motion;
+    entry.weaponAttackElapsed = 0;
+    entry.weaponAttackDuration = weaponModels.attackDuration(motion);
+    entry.controller?.triggerAttack(motion);
   }
 
-  private setLabel(e: Entry): void {
-    if (!e.root) return;
-    if (e.label) {
-      e.root.remove(e.label);
-      this.disposeLabel(e.label);
+  private setLabel(entry: Entry): void {
+    if (!entry.root) return;
+    if (entry.label) {
+      entry.root.remove(entry.label);
+      this.disposeLabel(entry.label);
     }
-    const label = makeLabel(e.name || TEAMS[e.team].name, TEAMS[e.team % TEAMS.length].color);
+    const label = makeLabel(entry.name || TEAMS[entry.team].name, TEAMS[entry.team % TEAMS.length].color);
     label.position.y = 2.25;
-    e.root.add(label);
-    e.label = label;
+    label.visible = entry.alive;
+    entry.root.add(label);
+    entry.label = label;
   }
 
-  private setAction(e: Entry, name: string): void {
-    if (!name || e.current === name || !e.actions[name]) return;
-    const next = e.actions[name];
-    const prev = e.current ? e.actions[e.current] : null;
-    next.reset().setEffectiveWeight(1).fadeIn(0.2).play();
-    if (prev && prev !== next) prev.fadeOut(0.2);
-    e.current = name;
-  }
+  updateTarget(
+    id: string,
+    x: number,
+    y: number,
+    z: number,
+    yaw: number,
+    alive: boolean,
+    weapon = 0,
+    name = '',
+    vx = 0,
+    vy = 0,
+    vz = 0,
+  ): void {
+    const entry = this.active.get(id);
+    if (!entry) return;
 
-  updateTarget(id: string, x: number, y: number, z: number, yaw: number, visible: boolean, weapon = 0, name = ''): void {
-    const e = this.active.get(id);
-    if (!e) return;
-    e.tx = x; e.ty = y; e.tz = z; e.tyaw = yaw; e.visible = visible;
-    if (name && name !== e.name) { e.name = name; if (e.root) this.setLabel(e); }
-    if (weapon !== e.weapon) { e.weapon = weapon; this.attachWeapon(e, weapon); }
-    if (e.root) {
-      e.root.visible = visible;
-      if (e.fresh) {
-        e.root.position.set(x, y, z);
-        e.root.rotation.y = yaw;
-        e.px = x; e.pz = z;
-        e.fresh = false;
-      }
+    const wasAlive = entry.alive;
+    const networkDy = y - entry.ty;
+    entry.grounded = entry.fresh || (Math.abs(vy) < 0.05 && Math.abs(networkDy) < 0.04);
+    entry.tx = x;
+    entry.ty = y;
+    entry.tz = z;
+    entry.tyaw = yaw;
+    entry.tvx = vx;
+    entry.tvy = vy;
+    entry.tvz = vz;
+    entry.alive = alive;
+    const weaponChanged = entry.weaponState !== weapon;
+    entry.weaponState = weapon;
+    if (weaponChanged) this.attachWeapon(id, entry, weapon);
+
+    if (name && name !== entry.name) {
+      entry.name = name;
+      if (entry.root) this.setLabel(entry);
     }
+    if (!entry.root) return;
+
+    if (alive && !wasAlive) {
+      entry.deathT = 0;
+      entry.fresh = true;
+      entry.controller?.respawn();
+    } else if (!alive && wasAlive) {
+      entry.deathT = entry.controller?.triggerDeath() ?? 0;
+    }
+
+    entry.root.visible = alive || entry.deathT > 0;
+    if (entry.label) entry.label.visible = alive;
+    if (entry.ring) entry.ring.visible = alive;
+    if (entry.fresh && alive) {
+      entry.root.position.set(x, y, z);
+      entry.root.rotation.y = yaw;
+      entry.px = x;
+      entry.pz = z;
+      entry.fresh = false;
+    }
+  }
+
+  setCelebratingTeam(team: number): void {
+    this.celebratingTeam = team;
   }
 
   hitFlash(id: string): void {
-    const e = this.active.get(id);
-    if (!e) return;
-    e.hitFlash = 0.25;
-    for (const m of e.mats) { if (m.emissive) { m.emissive.setHex(0xff3333); m.emissiveIntensity = 0.9; } }
+    const entry = this.active.get(id);
+    if (!entry || !entry.alive) return;
+    entry.controller?.triggerHit();
+    entry.hitFlash = 0.25;
   }
 
   remove(id: string): void {
-    const e = this.active.get(id);
-    if (!e) return;
-    if (e.root) this.scene.remove(e.root);
-    e.mixer?.stopAllAction();
-    if (e.label) this.disposeLabel(e.label);
-    if (e.ring) {
-      e.ring.geometry.dispose();
-      (e.ring.material as THREE.Material).dispose();
+    const entry = this.active.get(id);
+    if (!entry) return;
+    if (entry.root) this.scene.remove(entry.root);
+    entry.controller?.dispose();
+    if (entry.heldWeapon && entry.weaponAnchor) entry.weaponAnchor.remove(entry.heldWeapon);
+    if (entry.label) this.disposeLabel(entry.label);
+    if (entry.ring) {
+      entry.ring.geometry.dispose();
+      (entry.ring.material as THREE.Material).dispose();
     }
-    for (const m of e.mats) m.dispose();
     this.active.delete(id);
   }
 
+  clear(): void {
+    for (const id of [...this.active.keys()]) this.remove(id);
+    this.celebratingTeam = -1;
+  }
+
   private disposeLabel(label: THREE.Sprite): void {
-    const mat = label.material as THREE.SpriteMaterial;
-    mat.map?.dispose();
-    mat.dispose();
+    const material = label.material as THREE.SpriteMaterial;
+    material.map?.dispose();
+    material.dispose();
   }
 
   prune(seen: Set<string>): void {
@@ -301,64 +413,112 @@ export class RemotePlayers {
     }
   }
 
-  /** Allocation-free target query used by the per-frame combat reticle. */
-  findTarget(ox: number, oy: number, oz: number, dx: number, dy: number, dz: number, maxDist: number): string | null {
+  /** Exact crosshair/AABB target query used by combat input. */
+  findTarget(
+    ox: number, oy: number, oz: number,
+    dx: number, dy: number, dz: number,
+    maxDist: number,
+    attackerTeam: number,
+  ): string | null {
     let best: string | null = null;
     let bestDist = maxDist;
-    this.active.forEach((e, id) => {
-      if (!e.visible) return;
-      const px = e.tx - ox;
-      const py = e.ty + 1 - oy;
-      const pz = e.tz - oz;
-      const dist = Math.hypot(px, py, pz);
-      if (dist > bestDist) return;
-      if ((px * dx + py * dy + pz * dz) / (dist || 1) < 0.94) return;
+    this.active.forEach((entry, id) => {
+      if (!entry.alive || entry.team === attackerTeam) return;
+      const distance = rayAabbDistance(
+        ox, oy, oz, dx, dy, dz,
+        entry.tx - PLAYER_HALF_W, entry.ty, entry.tz - PLAYER_HALF_W,
+        entry.tx + PLAYER_HALF_W, entry.ty + PLAYER_HEIGHT, entry.tz + PLAYER_HALF_W,
+        bestDist,
+      );
+      if (distance === null || distance > bestDist) return;
       best = id;
-      bestDist = dist;
+      bestDist = distance;
     });
     return best;
   }
 
+  private updateWeaponMotion(entry: Entry, dt: number): void {
+    const held = entry.heldWeapon;
+    if (!held) return;
+    held.position.set(0, 0, 0);
+    held.rotation.set(0, 0, 0, 'XYZ');
+    if (!entry.weaponAttackMotion || entry.weaponAttackDuration <= 0) return;
+
+    entry.weaponAttackElapsed = Math.min(
+      entry.weaponAttackDuration,
+      entry.weaponAttackElapsed + dt,
+    );
+    const progress = entry.weaponAttackElapsed / entry.weaponAttackDuration;
+    if (progress >= 1) {
+      entry.weaponAttackDuration = 0;
+      entry.weaponAttackMotion = null;
+      return;
+    }
+    const envelope = Math.sin(progress * Math.PI);
+    if (entry.weaponAttackMotion === 'stab') {
+      held.position.y += envelope * 0.18;
+      held.rotation.x -= envelope * 0.18;
+    } else if (entry.weaponAttackMotion === 'quickSlash') {
+      held.rotation.z += envelope * 0.85;
+      held.rotation.x -= envelope * 0.25;
+    } else if (entry.weaponAttackMotion === 'wideSlash') {
+      held.rotation.z += envelope * 1.15;
+      held.rotation.y -= envelope * 0.38;
+    } else if (entry.weaponAttackMotion === 'overhead') {
+      held.rotation.x -= envelope * 1.20;
+      held.position.z -= envelope * 0.07;
+    } else if (entry.weaponAttackMotion === 'doubleHeavy') {
+      held.rotation.x -= envelope * 1.42;
+      held.rotation.z += envelope * 0.42;
+      held.position.z -= envelope * 0.10;
+    } else {
+      const raise = progress < 0.28 ? progress / 0.28 : Math.max(0, 1 - (progress - 0.28) / 0.72);
+      const recoilProgress = (progress - 0.28) / 0.18;
+      const recoil = recoilProgress >= 0 && recoilProgress <= 1 ? Math.sin(recoilProgress * Math.PI) : 0;
+      held.rotation.x -= raise * 0.34;
+      held.position.y += raise * 0.04;
+      held.position.z += recoil * 0.09;
+    }
+  }
+
   update(dt: number): void {
-    const k = 1 - Math.exp(-12 * dt);
-    this.active.forEach((e) => {
-      const root = e.root;
+    const interpolation = 1 - Math.exp(-12 * dt);
+    this.active.forEach((entry) => {
+      const root = entry.root;
       if (!root) return;
 
-      root.position.x += (e.tx - root.position.x) * k;
-      root.position.y += (e.ty - root.position.y) * k;
-      root.position.z += (e.tz - root.position.z) * k;
-      let d = e.tyaw - root.rotation.y;
-      d = Math.atan2(Math.sin(d), Math.cos(d));
-      root.rotation.y += d * k;
+      root.position.x += (entry.tx - root.position.x) * interpolation;
+      root.position.y += (entry.ty - root.position.y) * interpolation;
+      root.position.z += (entry.tz - root.position.z) * interpolation;
+      let yawDelta = entry.tyaw - root.rotation.y;
+      yawDelta = Math.atan2(Math.sin(yawDelta), Math.cos(yawDelta));
+      root.rotation.y += yawDelta * interpolation;
 
-      const dx = root.position.x - e.px;
-      const dz = root.position.z - e.pz;
-      e.px = root.position.x;
-      e.pz = root.position.z;
-      // Invisible/dead avatars cannot contribute pixels, so their animation
-      // mixer is paused until they become visible again. Visible animations
-      // continue at full rate and with the exact same clips/blending.
-      if (e.visible) {
-        e.mixer?.update(dt);
-        // Attach a queued weapon once the weapon models finish loading.
-        if (e.bone && e.held === null && weaponModels.ready) this.attachWeapon(e, e.weapon);
-      }
-      // While an attack swing is playing, don't override it with locomotion.
-      if (e.attackT > 0) {
-        e.attackT -= dt;
-      } else if (e.visible) {
-        const speed = Math.hypot(dx, dz) / Math.max(dt, 1e-3);
-        this.setAction(e, speed > RUN_SPEED ? 'Run' : speed > WALK_SPEED ? 'Walk' : 'Idle');
+      const dx = root.position.x - entry.px;
+      const dz = root.position.z - entry.pz;
+      entry.px = root.position.x;
+      entry.pz = root.position.z;
+      const interpolatedSpeed = Math.hypot(dx, dz) / Math.max(dt, 1e-3);
+      const authoritativeSpeed = Math.hypot(entry.tvx, entry.tvz);
+
+      if (root.visible) {
+        entry.controller?.update(dt, {
+          speed: Math.max(interpolatedSpeed, authoritativeSpeed),
+          verticalSpeed: entry.tvy,
+          grounded: entry.grounded,
+          alive: entry.alive,
+          celebrating: entry.alive && entry.team === this.celebratingTeam,
+          armed: true,
+        });
+        this.updateWeaponMotion(entry, dt);
       }
 
-      if (e.hitFlash > 0) {
-        e.hitFlash -= dt;
-        if (e.hitFlash <= 0) {
-          const c = TEAMS[e.team % TEAMS.length].color;
-          for (const m of e.mats) { if (m.emissive) { m.emissive.setHex(c); m.emissiveIntensity = 0.3; } }
-        }
+      if (!entry.alive && entry.deathT > 0) {
+        entry.deathT = Math.max(0, entry.deathT - dt);
+        if (entry.deathT === 0) root.visible = false;
       }
+
+      if (entry.hitFlash > 0) entry.hitFlash = Math.max(0, entry.hitFlash - dt);
     });
   }
 }

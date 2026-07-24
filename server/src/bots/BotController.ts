@@ -1,5 +1,7 @@
 import {
   BlockType,
+  PLAYER_HALF_W,
+  PLAYER_HEIGHT,
   PLAYER_EYE,
   REACH,
   TICK_MS,
@@ -26,7 +28,6 @@ export interface BotPlayerView {
   alive: boolean;
   weapon: number;
   weapons: number;
-  blocking: boolean;
   wool: number;
 }
 
@@ -40,8 +41,7 @@ export interface BotRuntime {
   bedsAlive(): number;
   enqueue(id: string, input: MoveInput): void;
   equip(id: string, weapon: WeaponId): void;
-  block(id: string, enabled: boolean): void;
-  attack(id: string, target: string, aimError: number): void;
+  attack(id: string, target: string): void;
   breakBlock(id: string, x: number, y: number, z: number): void;
   placeBlock(id: string, x: number, y: number, z: number, block: number): boolean;
 }
@@ -51,15 +51,14 @@ interface DifficultySpec {
   replanMs: number;
   sight: number;
   turnRate: number;
-  aimError: number;
   maxNodes: number;
   attackJitter: number;
 }
 
 const DIFFICULTY: Record<BotDifficulty, DifficultySpec> = {
-  [BotDifficulty.Easy]: { thinkMs: 560, replanMs: 1450, sight: 24, turnRate: 3.0, aimError: 2.8, maxNodes: 750, attackJitter: 460 },
-  [BotDifficulty.Medium]: { thinkMs: 330, replanMs: 950, sight: 38, turnRate: 5.2, aimError: 1.15, maxNodes: 1300, attackJitter: 250 },
-  [BotDifficulty.Hard]: { thinkMs: 180, replanMs: 620, sight: 56, turnRate: 8.0, aimError: 0.34, maxNodes: 2200, attackJitter: 100 },
+  [BotDifficulty.Easy]: { thinkMs: 560, replanMs: 1450, sight: 24, turnRate: 3.0, maxNodes: 750, attackJitter: 460 },
+  [BotDifficulty.Medium]: { thinkMs: 330, replanMs: 950, sight: 38, turnRate: 5.2, maxNodes: 1300, attackJitter: 250 },
+  [BotDifficulty.Hard]: { thinkMs: 180, replanMs: 620, sight: 56, turnRate: 8.0, maxNodes: 2200, attackJitter: 100 },
 };
 
 type GoalKind = 'combat' | 'defend' | 'treasure' | 'base' | 'wander';
@@ -77,7 +76,6 @@ interface Brain {
   nextAttack: number;
   nextBreak: number;
   nextLook: number;
-  blockUntil: number;
   forcedTarget: string | null;
   target: string | null;
   goal: GoalKind;
@@ -93,8 +91,18 @@ interface Brain {
   wander: Point | null;
 }
 
-const ROLE_ORDER = [WeaponId.IronSword, WeaponId.Spear, WeaponId.Axe, WeaponId.Bow, WeaponId.Shield];
+const ROLE_ORDER = [
+  WeaponId.Dagger,
+  WeaponId.NormalSword,
+  WeaponId.LargeSword,
+  WeaponId.Cutlass,
+  WeaponId.Axe,
+  WeaponId.DoubleAxe,
+];
 const PATH_DIRS: ReadonlyArray<readonly [number, number]> = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]];
+const WAYPOINT_RADIUS = 0.3;
+const NAVIGATION_RADIUS = PLAYER_HALF_W + 0.08;
+const NAVIGATION_LOOK_AHEAD = 0.45;
 
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
 const sqr = (v: number) => v * v;
@@ -139,14 +147,21 @@ export class BotController {
   private brains = new Map<string, Brain>();
   private playerSnapshot: Array<[string, BotPlayerView]> = [];
 
-  constructor(private readonly runtime: BotRuntime) {}
+  constructor(private readonly runtime: BotRuntime) {
+    console.info('[bedwars] AI navigation status:', {
+      collisionAware: true,
+      wallMargin: NAVIGATION_RADIUS - PLAYER_HALF_W,
+      diagonalCornerCutting: false,
+      blockedRouteRepathing: true,
+    });
+  }
 
   add(id: string, difficulty: BotDifficulty, seed: number): void {
     const p = this.runtime.getPlayer(id);
     this.brains.set(id, {
       id, difficulty, role: ROLE_ORDER[seed % ROLE_ORDER.length]!, seq: 1,
       yaw: p?.yaw ?? 0, nextThink: 0, nextReplan: 0, nextAttack: 0, nextBreak: 0, nextLook: 0,
-      blockUntil: 0, forcedTarget: null, target: null, goal: 'wander', goalPoint: null,
+      forcedTarget: null, target: null, goal: 'wander', goalPoint: null,
       path: [], pathIndex: 0, plannedX: Number.NaN, plannedY: Number.NaN, plannedZ: Number.NaN,
       lastX: p?.x ?? 0, lastZ: p?.z ?? 0, stuckTicks: 0, wander: null,
     });
@@ -211,20 +226,13 @@ export class BotController {
     }
     if (brain.forcedTarget && brain.target !== brain.forcedTarget) brain.forcedTarget = null;
 
-    // Weapon policy: axe takes the treasure objective, spear keeps enemies at
-    // medium distance, bow holds long lanes, and a shield is raised only in
-    // short defensive bursts before returning to the bot's role.
+    // Weapon policy remains role-based; the axe is preferred for treasure
+    // objectives, while every role uses the same authoritative melee path.
     const target = brain.target ? this.runtime.getPlayer(brain.target) : undefined;
     let desired = brain.role;
     if (brain.goal === 'treasure' && this.owns(p, WeaponId.Axe)) desired = WeaponId.Axe;
-    if (target && Math.hypot(target.x - p.x, target.z - p.z) < 7 && p.hp <= 12 && this.owns(p, WeaponId.Shield) && Math.random() < 0.32) {
-      desired = WeaponId.Shield;
-      brain.blockUntil = now + 260 + Math.random() * 420;
-    }
-    if (desired === WeaponId.Shield && now >= brain.blockUntil) desired = this.owns(p, brain.role) ? brain.role : WeaponId.IronSword;
-    if (!this.owns(p, desired)) desired = WeaponId.IronSword;
+    if (!this.owns(p, desired)) desired = WeaponId.Dagger;
     if (p.weapon !== desired) this.runtime.equip(brain.id, desired);
-    this.runtime.block(brain.id, desired === WeaponId.Shield && now < brain.blockUntil);
 
     const goalMoved = !!brain.goalPoint && (
       sqr(brain.goalPoint.x - brain.plannedX) + sqr(brain.goalPoint.y - brain.plannedY) + sqr(brain.goalPoint.z - brain.plannedZ) > 2.25
@@ -249,25 +257,37 @@ export class BotController {
     let waypoint: Point | null = null;
     while (brain.pathIndex < brain.path.length) {
       const n = brain.path[brain.pathIndex]!;
-      if (Math.hypot(n.x - p.x, n.z - p.z) < 0.7) brain.pathIndex++;
+      // Do not skip a corner before the bot reaches its safe cell center.
+      // Early waypoint skipping was allowing diagonal motion to scrape and
+      // repeatedly push into fort walls.
+      if (Math.hypot(n.x - p.x, n.z - p.z) < WAYPOINT_RADIUS) brain.pathIndex++;
       else { waypoint = n; break; }
     }
-    if (!waypoint && brain.goalPoint) waypoint = brain.goalPoint;
 
     let moveX = 0; let moveZ = 0; let jump = false;
     if (waypoint) {
       const dx = waypoint.x - p.x; const dz = waypoint.z - p.z;
       const len = Math.hypot(dx, dz);
-      const desiredYaw = Math.atan2(-dx, -dz);
-      const delta = wrap(desiredYaw - brain.yaw);
-      brain.yaw += clamp(delta, -spec.turnRate * (TICK_MS / 1000), spec.turnRate * (TICK_MS / 1000));
-      const sin = Math.sin(brain.yaw); const cos = Math.cos(brain.yaw);
-      if (len > 0.25) {
-        // Convert desired world direction into the controller's local axes.
-        moveX = clamp((dx / len) * cos - (dz / len) * sin, -1, 1);
-        moveZ = clamp(-(dx / len) * sin - (dz / len) * cos, -1, 1);
+      const needsJump = this.needsJump(p, phys, dx, dz);
+      if (!this.canAdvance(p, dx, dz, needsJump)) {
+        // Never fall back to steering directly at an unreachable objective.
+        // Clear the route immediately so the next server tick runs A* again.
+        brain.path = [];
+        brain.pathIndex = 0;
+        brain.nextReplan = 0;
+        brain.nextThink = 0;
+      } else {
+        const desiredYaw = Math.atan2(-dx, -dz);
+        const delta = wrap(desiredYaw - brain.yaw);
+        brain.yaw += clamp(delta, -spec.turnRate * (TICK_MS / 1000), spec.turnRate * (TICK_MS / 1000));
+        const sin = Math.sin(brain.yaw); const cos = Math.cos(brain.yaw);
+        if (len > 0.25) {
+          // Convert desired world direction into the controller's local axes.
+          moveX = clamp((dx / len) * cos - (dz / len) * sin, -1, 1);
+          moveZ = clamp(-(dx / len) * sin - (dz / len) * cos, -1, 1);
+        }
+        jump = needsJump;
       }
-      jump = this.needsJump(p, phys, dx, dz) || (phys.onGround && Math.random() < (brain.difficulty === BotDifficulty.Easy ? 0.004 : 0.009));
     } else if (now >= brain.nextLook) {
       brain.nextLook = now + 450 + Math.random() * 850;
       brain.yaw += (Math.random() - 0.5) * 1.4; // natural idle scanning
@@ -275,7 +295,19 @@ export class BotController {
 
     const moved = Math.hypot(p.x - brain.lastX, p.z - brain.lastZ);
     brain.stuckTicks = (Math.abs(moveX) + Math.abs(moveZ) > 0.25 && moved < 0.045) ? brain.stuckTicks + 1 : 0;
-    if (brain.stuckTicks > 10) { brain.nextReplan = 0; jump = true; brain.stuckTicks = 0; }
+    if (brain.stuckTicks > 8) {
+      // A dynamic blockage or an edge collision has stopped this route. Stop
+      // issuing movement into the wall and replan on the next authoritative
+      // tick instead of using a blind jump as the recovery mechanism.
+      brain.path = [];
+      brain.pathIndex = 0;
+      brain.nextReplan = 0;
+      brain.nextThink = 0;
+      moveX = 0;
+      moveZ = 0;
+      jump = false;
+      brain.stuckTicks = 0;
+    }
     brain.lastX = p.x; brain.lastZ = p.z;
 
     this.runtime.enqueue(brain.id, {
@@ -285,14 +317,12 @@ export class BotController {
   }
 
   private tryCombat(brain: Brain, p: BotPlayerView, target: BotPlayerView, now: number, spec: DifficultySpec): void {
-    const weapon = WEAPONS[p.weapon as WeaponId] ?? WEAPONS[WeaponId.IronSword];
-    if (weapon.shield || p.blocking) return;
+    const weapon = WEAPONS[p.weapon as WeaponId] ?? WEAPONS[WeaponId.Dagger];
     const d = Math.hypot(target.x - p.x, target.y - p.y, target.z - p.z);
-    const engage = weapon.ranged ? weapon.range : weapon.range + 0.5;
-    if (d > engage || now < brain.nextAttack) return;
+    if (d > weapon.range + PLAYER_HALF_W || now < brain.nextAttack) return;
     const base = weapon.cooldownMs + spec.attackJitter;
     brain.nextAttack = now + base * (0.75 + Math.random() * 0.55);
-    this.runtime.attack(brain.id, brain.target!, spec.aimError);
+    this.runtime.attack(brain.id, brain.target!);
   }
 
   private tryTreasure(brain: Brain, p: BotPlayerView, now: number, spec: DifficultySpec): void {
@@ -360,12 +390,51 @@ export class BotController {
     return this.runtime.world.isSolid(x, y, z) && !this.runtime.world.isSolid(x, y + 1, z);
   }
 
+  /** Test an inflated player AABB, preserving an 0.08-block wall margin. */
+  private hasNavigationClearance(x: number, y: number, z: number): boolean {
+    const world = this.runtime.world;
+    const x0 = Math.floor(x - NAVIGATION_RADIUS);
+    const x1 = Math.floor(x + NAVIGATION_RADIUS);
+    const z0 = Math.floor(z - NAVIGATION_RADIUS);
+    const z1 = Math.floor(z + NAVIGATION_RADIUS);
+    const y0 = Math.floor(y);
+    const y1 = Math.floor(y + PLAYER_HEIGHT - 1e-4);
+    for (let gx = x0; gx <= x1; gx++) {
+      for (let gy = y0; gy <= y1; gy++) {
+        for (let gz = z0; gz <= z1; gz++) {
+          if (world.isSolid(gx, gy, gz)) return false;
+        }
+      }
+    }
+    return true;
+  }
+
+  /** Probe the body volume ahead before emitting a movement input. */
+  private canAdvance(p: BotPlayerView, dx: number, dz: number, jumping: boolean): boolean {
+    const length = Math.hypot(dx, dz);
+    if (length < 0.05) return true;
+    const nx = dx / length;
+    const nz = dz / length;
+    for (const distance of [NAVIGATION_LOOK_AHEAD * 0.5, NAVIGATION_LOOK_AHEAD]) {
+      const x = p.x + nx * distance;
+      const z = p.z + nz * distance;
+      if (this.hasNavigationClearance(x, p.y, z)) continue;
+      // A single voxel ledge is valid only when the bot already committed to
+      // a jump and its raised body volume has a clear landing path.
+      if (jumping && this.hasNavigationClearance(x, p.y + 0.8, z)) continue;
+      return false;
+    }
+    return true;
+  }
+
   /** A* over walkable surfaces. A cell requires ground plus two clear head cells, so air/water gaps are rejected. */
   private plan(from: Point, to: Point, maxNodes: number): PathNode[] {
     const start = this.walkCell(Math.floor(from.x), Math.floor(from.z), from.y);
     const goal = this.nearestWalkCell(Math.floor(to.x), Math.floor(to.z), to.y);
     if (!start || !goal) return [];
-    if (this.directWalkable(start, goal)) return [start, goal];
+    // Always use the collision-checked grid path. A straight-line shortcut can
+    // graze a wall corner between sampled cells even when both endpoints are
+    // valid, which is exactly the case that made bots push into geometry.
     const open = new MinHeap<PathNode>();
     const came = new Map<number, number>();
     const nodes = new Map<number, PathNode>();
@@ -395,17 +464,6 @@ export class BotController {
     return out.reverse();
   }
 
-  private directWalkable(a: PathNode, b: PathNode): boolean {
-    const n = Math.max(1, Math.ceil(Math.hypot(b.gx - a.gx, b.gz - a.gz)));
-    let y = a.y;
-    for (let i = 1; i <= n; i++) {
-      const c = this.walkCell(Math.round(a.gx + (b.gx - a.gx) * (i / n)), Math.round(a.gz + (b.gz - a.gz) * (i / n)), y);
-      if (!c || Math.abs(c.y - y) > 1.05) return false;
-      y = c.y;
-    }
-    return true;
-  }
-
   private nearestWalkCell(x: number, z: number, y: number): PathNode | null {
     for (let r = 0; r <= 4; r++) for (let ox = -r; ox <= r; ox++) for (let oz = -r; oz <= r; oz++) {
       if (Math.max(Math.abs(ox), Math.abs(oz)) !== r) continue;
@@ -421,7 +479,12 @@ export class BotController {
     // Bias toward the current level, then fall back through the map. This keeps
     // paths on fort floors instead of selecting a buried soil layer.
     for (let y = guess + 2; y >= 1; y--) {
-      if (w.isSolid(x, y - 1, z) && !w.isSolid(x, y, z) && !w.isSolid(x, y + 1, z)) return { x: x + 0.5, y, z: z + 0.5, gx: x, gz: z };
+      if (
+        w.isSolid(x, y - 1, z)
+        && !w.isSolid(x, y, z)
+        && !w.isSolid(x, y + 1, z)
+        && this.hasNavigationClearance(x + 0.5, y, z + 0.5)
+      ) return { x: x + 0.5, y, z: z + 0.5, gx: x, gz: z };
     }
     return null;
   }

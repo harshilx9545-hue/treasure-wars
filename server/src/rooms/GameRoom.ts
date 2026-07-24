@@ -3,6 +3,7 @@ import {
   VoxelWorld,
   generateMap,
   stepPlayer,
+  raycastVoxel,
   Msg,
   BLOCKS,
   BlockType,
@@ -12,7 +13,6 @@ import {
   TICK_MS,
   TICK_RATE,
   REACH,
-  ATTACK_REACH,
   VOID_Y,
   TEAM_COUNT,
   RESPAWN_SECONDS,
@@ -28,6 +28,10 @@ import {
   WEAPONS,
   WeaponId,
   STARTING_WEAPONS,
+  ALL_WEAPON_MASK,
+  SWORD_WEAPON_MASK,
+  weaponForSwordTier,
+  isWeapon,
   treasurePosition,
   type SpawnPoint,
   type MoveInput,
@@ -52,8 +56,9 @@ const ALARM_COOLDOWN_MS = 6000;
 // Fall damage: no damage for drops up to SAFE blocks, then 1 hp per extra block.
 const FALL_SAFE_BLOCKS = 3.5;
 const FALL_DMG_PER_BLOCK = 1;
+const MELEE_FACING_DOT = 0.35;
 
-interface ProjMeta { vx: number; vy: number; vz: number; owner: string; team: number; ttl: number; kind: number; damage?: number; gravity?: number; }
+interface ProjMeta { vx: number; vy: number; vz: number; owner: string; team: number; ttl: number; kind: number; gravity?: number; }
 
 export class GameRoom extends Room<BedwarsState> {
   maxClients = 16;
@@ -111,11 +116,7 @@ export class GameRoom extends Room<BedwarsState> {
         if (q && q.length < MAX_QUEUE) q.push(input);
       },
       equip: (id, weapon) => this.selectWeaponFor(id, weapon),
-      block: (id, enabled) => {
-        const p = this.state.players.get(id);
-        if (p) p.blocking = enabled && p.weapon === WeaponId.Shield;
-      },
-      attack: (id, target, aimError) => this.tryAttackFor(id, target, false, aimError),
+      attack: (id, target) => this.tryAttackFor(id, target),
       breakBlock: (id, x, y, z) => this.tryBreakFor(id, { x, y, z }),
       placeBlock: (id, x, y, z, block) => this.tryPlaceFor(id, { x, y, z, block }),
     });
@@ -155,10 +156,6 @@ export class GameRoom extends Room<BedwarsState> {
     this.onMessage(Msg.Purchase, (client, m: PurchaseMessage) => this.tryPurchase(client, m));
     this.onMessage(Msg.UseItem, (client, m: UseItemMessage) => this.tryUseItem(client, m));
     this.onMessage(Msg.Weapon, (client, m: { weapon?: number }) => this.trySelectWeapon(client, m));
-    this.onMessage(Msg.Block, (client, m: { blocking?: boolean }) => {
-      const p = this.state.players.get(client.sessionId);
-      if (p) p.blocking = !!m?.blocking && p.weapon === WeaponId.Shield;
-    });
     this.onMessage(Msg.Unstuck, (client) => this.unstuck(client));
     this.onMessage(Msg.Rematch, () => this.tryRematch());
     this.onMessage(Msg.SetDuration, (client, m: { minutes?: number }) => {
@@ -279,14 +276,14 @@ export class GameRoom extends Room<BedwarsState> {
       let owned = 0;
       for (const w of STARTING_WEAPONS) owned |= (1 << w);
       p.weapons = owned;
-      p.weapon = STARTING_WEAPONS[0] ?? WeaponId.IronSword;
+      p.weapon = STARTING_WEAPONS[0] ?? WeaponId.Dagger;
+      p.swordTier = 0;
       p.blocking = false;
-      // Bots are given a compact tactical loadout at match start. They still
-      // collect generators and share every regular combat/block validation,
-      // but this lets a mixed bot squad cover each required weapon role.
+      // Bots receive every approved melee weapon; their existing role policy
+      // selects among the same authoritative definitions used by players.
       if (p.isBot) {
         p.wool = ECONOMY.starting.wool * 2;
-        p.weapons = (1 << WeaponId.IronSword) | (1 << WeaponId.Axe) | (1 << WeaponId.Spear) | (1 << WeaponId.Bow) | (1 << WeaponId.Shield);
+        p.weapons = ALL_WEAPON_MASK;
       }
       this.respawn(id);
     });
@@ -411,8 +408,9 @@ export class GameRoom extends Room<BedwarsState> {
       p.coins = 0; p.coinsEarned = 0;
       p.wool = 0; p.plank = 0; p.stone = 0;
       p.pickTier = 0; p.shears = false;
+      p.swordTier = 0;
       p.tnt = 0; p.pearls = 0; p.fireballs = 0; p.alarms = 0;
-      p.weapons = 1 << WeaponId.IronSword; p.weapon = WeaponId.IronSword; p.blocking = false;
+      p.weapons = 1 << WeaponId.Dagger; p.weapon = WeaponId.Dagger; p.blocking = false;
       p.kills = 0; p.deaths = 0; p.assists = 0;
       p.effects.clear();
       const phys = this.phys.get(id);
@@ -572,11 +570,20 @@ export class GameRoom extends Room<BedwarsState> {
         if (!charge(cost)) return;
         p.stone += b.stack; notice(`+${b.stack} Stone`, true); break;
       }
+      case 'sword': {
+        const nextTier = p.swordTier + 1;
+        if (nextTier >= ECONOMY.swords.length) { notice('Max sword tier', false); return; }
+        const tier = ECONOMY.swords[nextTier];
+        if (!charge(tier.price)) return;
+        const nextWeapon = weaponForSwordTier(nextTier);
+        p.swordTier = nextTier;
+        p.weapons = (p.weapons & ~SWORD_WEAPON_MASK) | (1 << nextWeapon);
+        p.weapon = nextWeapon;
+        p.blocking = false;
+        notice(`Bought ${tier.name}`, true);
+        break;
+      }
       case 'weapon_axe': this.buyWeapon(client, p, WeaponId.Axe, charge, notice); break;
-      case 'weapon_pickaxe': this.buyWeapon(client, p, WeaponId.Pickaxe, charge, notice); break;
-      case 'weapon_spear': this.buyWeapon(client, p, WeaponId.Spear, charge, notice); break;
-      case 'weapon_bow': this.buyWeapon(client, p, WeaponId.Bow, charge, notice); break;
-      case 'weapon_shield': this.buyWeapon(client, p, WeaponId.Shield, charge, notice); break;
       case 'weapon_doubleaxe': this.buyWeapon(client, p, WeaponId.DoubleAxe, charge, notice); break;
       case 'armor': {
         const next = team.armorTier + 1;
@@ -703,7 +710,7 @@ export class GameRoom extends Room<BedwarsState> {
       const meta = this.projMeta.get(key);
       if (!meta) { remove.push(key); return; }
       meta.ttl -= dt;
-      if (meta.kind === 1 || meta.kind === 2) meta.vy -= (meta.gravity ?? (meta.kind === 1 ? 12 : 11)) * dt;
+      if (meta.kind === 1) meta.vy -= (meta.gravity ?? 12) * dt;
 
       // Substep to avoid tunneling through thin walls.
       const steps = 6;
@@ -715,7 +722,7 @@ export class GameRoom extends Room<BedwarsState> {
         proj.y += meta.vy * sdt;
         proj.z += meta.vz * sdt;
         if (this.world.isSolid(Math.floor(proj.x), Math.floor(proj.y), Math.floor(proj.z))) { landed = true; break; }
-        // Enemy collision for fireballs and authoritative bow arrows.
+        // Enemy collision makes fireballs explode on contact.
         this.state.players.forEach((pl, pid) => {
           if (hitPlayer || pid === meta.owner || !pl.alive || pl.team === meta.team) return;
           const dx = pl.x - proj.x; const dy = pl.y + 1 - proj.y; const dz = pl.z - proj.z;
@@ -739,8 +746,6 @@ export class GameRoom extends Room<BedwarsState> {
         } else if (meta.kind === 1) {
           const f = ECONOMY.utility.fireball;
           this.explode(proj.x, proj.y, proj.z, f.radius, f.damage, f.knockback, meta.owner, meta.team, 'fireball');
-        } else if (meta.kind === 2 && hitPlayer) {
-          this.applyMeleeDamage(meta.owner, hitPlayer, meta.damage ?? 6, 0.55, false);
         }
         remove.push(key);
       }
@@ -1095,22 +1100,19 @@ export class GameRoom extends Room<BedwarsState> {
   }
 
   private tryAttack(client: Client, m: AttackMessage): void {
-    this.tryAttackFor(client.sessionId, m?.target, !!m?.crit);
+    this.tryAttackFor(client.sessionId, m?.target);
   }
 
-  private tryAttackFor(id: string, targetId: unknown, crit: boolean, aimError = 0): boolean {
+  private tryAttackFor(id: string, targetId: unknown): boolean {
     if (this.state.phase !== 'playing') return false;
     const attacker = this.state.players.get(id);
-    if (!attacker?.alive) return false;
+    if (!attacker?.alive || !isWeapon(attacker.weapon)) return false;
     if (typeof targetId !== 'string') return false;
     const victim = this.state.players.get(targetId);
-    if (!victim?.alive || targetId === id) return false;
-    if (victim.team === attacker.team) return false;
+    if (!victim?.alive || targetId === id || victim.team === attacker.team) return false;
+    if (((attacker.weapons >> attacker.weapon) & 1) === 0) return false;
 
-    // Active weapon governs damage / cooldown / range / knockback.
-    const weapon = WEAPONS[attacker.weapon as WeaponId] ?? WEAPONS[WeaponId.IronSword];
-    if (weapon.shield || attacker.blocking) return false; // can't attack while shielding
-
+    const weapon = WEAPONS[attacker.weapon];
     const now = Date.now();
     const last = this.lastAttack.get(id) ?? 0;
     if (now - last < weapon.cooldownMs) return false;
@@ -1119,15 +1121,37 @@ export class GameRoom extends Room<BedwarsState> {
     const vp = this.phys.get(targetId);
     if (!ap || !vp) return false;
 
+    const eyeY = ap.y + PLAYER_EYE;
+    const targetY = Math.max(vp.y + 0.05, Math.min(vp.y + PLAYER_HEIGHT - 0.05, eyeY));
     const dx = vp.x - ap.x;
-    const dy = vp.y + PLAYER_EYE * 0.5 - (ap.y + PLAYER_EYE);
+    const dy = targetY - eyeY;
     const dz = vp.z - ap.z;
-    const dist = Math.hypot(dx, dy, dz);
-    if (dist > weapon.range + 0.8) return false;
+    const centerDistance = Math.hypot(dx, dy, dz);
+    const surfaceDistance = Math.max(0, centerDistance - PLAYER_HALF_W);
+    if (surfaceDistance > weapon.range) return false;
 
+    const horizontal = Math.hypot(dx, dz);
+    if (horizontal > 1e-5) {
+      const forwardX = -Math.sin(attacker.yaw);
+      const forwardZ = -Math.cos(attacker.yaw);
+      if ((forwardX * dx + forwardZ * dz) / horizontal < MELEE_FACING_DOT) return false;
+    }
+
+    // The ray ends at the near face of the target volume. Any voxel hit before
+    // that point blocks the melee strike without requiring protocol changes.
+    const rayDistance = Math.max(0, centerDistance - PLAYER_HALF_W);
+    if (rayDistance > 0.05) {
+      const invDistance = 1 / centerDistance;
+      if (raycastVoxel(
+        ap.x, eyeY, ap.z,
+        dx * invDistance, dy * invDistance, dz * invDistance,
+        rayDistance, this.world.isSolid,
+      )) return false;
+    }
+
+    const crit = !ap.onGround && ap.vy < -0.15;
     this.lastAttack.set(id, now);
-    if (weapon.ranged) this.fireArrow(id, targetId, weapon, aimError);
-    else this.applyMeleeDamage(id, targetId, weapon.damage, weapon.knockback, crit);
+    this.applyMeleeDamage(id, targetId, weapon.damage, weapon.knockback, crit);
     return true;
   }
 
@@ -1145,19 +1169,16 @@ export class GameRoom extends Room<BedwarsState> {
 
     let dmg = (baseDamage + mods.strengthBonus) * (crit ? CRIT_MULT : 1);
     dmg *= this.armorMult(victim.team); // team armor reduction
-    dmg *= vmods.damageTaken; // shield power-up
-    // Shield weapon actively blocking: heavy damage + knockback reduction.
-    const blocking = victim.blocking && victim.weapon === WeaponId.Shield;
-    if (blocking) dmg *= 0.25;
+    dmg *= vmods.damageTaken; // defensive power-up
     dmg = Math.max(1, Math.round(dmg));
 
     const dx = vp.x - ap.x;
     const dz = vp.z - ap.z;
     const hlen = Math.hypot(dx, dz) || 1;
-    const push = KNOCKBACK_H * knockbackMult * (crit ? 1.25 : 1) * (blocking ? 0.4 : 1);
+    const push = KNOCKBACK_H * knockbackMult * (crit ? 1.25 : 1);
     vp.vx += (dx / hlen) * push;
     vp.vz += (dz / hlen) * push;
-    vp.vy = KNOCKBACK_V * (crit ? 1.2 : 1) * (blocking ? 0.5 : 1);
+    vp.vy = KNOCKBACK_V * (crit ? 1.2 : 1);
     vp.onGround = false;
     victim.vx = vp.vx; victim.vz = vp.vz; victim.vy = vp.vy;
 
@@ -1168,51 +1189,16 @@ export class GameRoom extends Room<BedwarsState> {
     this.broadcast(Msg.Hit, { target: targetId, by: attackerId, x: vp.x, y: vp.y + 1, z: vp.z, crit, fatal });
   }
 
-  /** Spawn a server-authoritative arrow. Bots pass an aim error by difficulty; human shots use zero error. */
-  private fireArrow(attackerId: string, targetId: string, weapon: typeof WEAPONS[WeaponId.Bow], aimError: number): void {
-    const ap = this.phys.get(attackerId);
-    const vp = this.phys.get(targetId);
-    const attacker = this.state.players.get(attackerId);
-    if (!ap || !vp || !attacker || !weapon.ranged) return;
-    const cfg = weapon.ranged;
-    const horizontal = Math.hypot(vp.x - ap.x, vp.z - ap.z);
-    const t = Math.max(0.08, horizontal / cfg.speed);
-    const errorX = (Math.random() - 0.5) * aimError;
-    const errorY = (Math.random() - 0.5) * aimError * 0.35;
-    const errorZ = (Math.random() - 0.5) * aimError;
-    const tx = vp.x + vp.vx * t + errorX;
-    const tz = vp.z + vp.vz * t + errorZ;
-    const oy = ap.y + PLAYER_EYE;
-    const ty = vp.y + PLAYER_EYE * 0.55 + vp.vy * t + errorY;
-    const dx = tx - ap.x; const dz = tz - ap.z;
-    const h = Math.hypot(dx, dz) || 1;
-    const proj = new Projectile();
-    proj.x = ap.x + (dx / h) * 0.7;
-    proj.y = oy;
-    proj.z = ap.z + (dz / h) * 0.7;
-    proj.kind = 2; proj.team = attacker.team;
-    const key = `p${this.idCounter++}`;
-    this.state.projectiles.set(key, proj);
-    this.projMeta.set(key, {
-      vx: (dx / h) * cfg.speed,
-      vy: (ty - oy + 0.5 * cfg.gravity * t * t) / t,
-      vz: (dz / h) * cfg.speed,
-      owner: attackerId, team: attacker.team, ttl: cfg.projectileLifetimeMs / 1000,
-      kind: 2, damage: weapon.damage, gravity: cfg.gravity,
-    });
-  }
-
   private trySelectWeapon(client: Client, m: { weapon?: number }): void {
     this.selectWeaponFor(client.sessionId, m?.weapon as WeaponId);
   }
 
   private selectWeaponFor(id: string, w: WeaponId): void {
     const p = this.state.players.get(id);
-    if (!p) return;
-    if (!(w in WEAPONS)) return;
+    if (!p || !isWeapon(w)) return;
     if (!((p.weapons >> w) & 1)) return; // must own it
     p.weapon = w;
-    if (w !== WeaponId.Shield) p.blocking = false;
+    p.blocking = false;
   }
 
   private tryPowerUp(client: Client, m: PowerUpMessage): void {

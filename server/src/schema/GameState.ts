@@ -33,13 +33,13 @@ export class PlayerState extends Schema {
   @type('uint16') wool = 0;
   @type('uint16') plank = 0;
   @type('uint16') stone = 0;
-  @type('uint8') swordTier = 0; // legacy (unused by combat; kept for compatibility)
+  @type('uint8') swordTier = 0; // index into the four sword replacements
   @type('uint8') pickTier = 0; // index into ECONOMY.pickaxes
   @type('boolean') shears = false;
   // Weapon system
-  @type('uint8') weapon = 0; // active WeaponId (0 = Iron Sword)
-  @type('uint8') weapons = 1; // owned bitmask (bit 0 = Iron Sword)
-  @type('boolean') blocking = false; // shield raised
+  @type('uint8') weapon = 0; // active WeaponId (0 = Dagger)
+  @type('uint8') weapons = 1; // owned bitmask (bit 0 = Dagger)
+  @type('boolean') blocking = false; // reserved replicated field; always false
   @type('uint8') tnt = 0;
   @type('uint8') pearls = 0;
   @type('uint8') fireballs = 0;
@@ -63,7 +63,7 @@ export class Projectile extends Schema {
   @type('number') x = 0;
   @type('number') y = 0;
   @type('number') z = 0;
-  @type('uint8') kind = 0; // 0 = pearl, 1 = fireball, 2 = arrow
+  @type('uint8') kind = 0; // 0 = pearl, 1 = fireball
   @type('uint8') team = 0;
 }
 

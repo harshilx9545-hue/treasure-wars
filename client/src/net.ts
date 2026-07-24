@@ -10,29 +10,58 @@ export interface RoomInfo {
   phase: string;
 }
 
+type EndpointSource = "local" | "query" | "vite" | "same-origin";
+
+interface EndpointResolution {
+  url: string;
+  source: EndpointSource;
+}
+
+function isLocalHost(hostname: string): boolean {
+  const host = hostname.toLowerCase();
+
+  if (host === "localhost" || host === "::1" || host.endsWith(".local")) return true;
+  if (/^127(?:\.\d{1,3}){3}$/.test(host)) return true;
+  if (/^10(?:\.\d{1,3}){3}$/.test(host)) return true;
+  if (/^192\.168(?:\.\d{1,3}){2}$/.test(host)) return true;
+
+  const private172 = /^172\.(\d{1,3})(?:\.\d{1,3}){2}$/.exec(host);
+  return private172 !== null && Number(private172[1]) >= 16 && Number(private172[1]) <= 31;
+}
+
 /**
  * Resolve the Colyseus server endpoint.
  *
- * Priority:
- * 1. ?server=wss://...
- * 2. VITE_SERVER_URL
- * 3. localhost (development)
+ * A client opened from a local host must never use a URL baked into a
+ * production build. This also makes a locally served production build connect
+ * to the local Colyseus process, rather than to the deployed service.
  */
-function endpoint(): string {
-  const params = new URLSearchParams(window.location.search);
+function resolveEndpoint(): EndpointResolution {
+  const { hostname, protocol } = window.location;
 
-  const override = params.get("server");
-  if (override) return override;
+  if (isLocalHost(hostname)) {
+    const host = hostname === "::1" ? "[::1]" : hostname;
+    return { url: `ws://${host}:2567`, source: "local" };
+  }
 
-  const env = import.meta.env.VITE_SERVER_URL;
-  if (env && env.length > 0) return env;
+  const override = new URLSearchParams(window.location.search).get("server")?.trim();
+  if (override) return { url: override, source: "query" };
 
-  const proto = window.location.protocol === "https:" ? "wss" : "ws";
-  return `${proto}://${window.location.hostname}:2567`;
+  const configured = import.meta.env.VITE_SERVER_URL?.trim();
+  if (configured) return { url: configured, source: "vite" };
+
+  const socketProtocol = protocol === "https:" ? "wss" : "ws";
+  return { url: `${socketProtocol}://${hostname}:2567`, source: "same-origin" };
 }
 
 export function makeClient(): Client {
-  return new Client(endpoint());
+  const endpoint = resolveEndpoint();
+  console.info("[bedwars] Connecting to Colyseus", {
+    endpoint: endpoint.url,
+    source: endpoint.source,
+    room: ROOM,
+  });
+  return new Client(endpoint.url);
 }
 
 export async function hostRoom(name: string): Promise<Room> {

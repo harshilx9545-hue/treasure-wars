@@ -4,9 +4,12 @@ export type Sfx =
   | 'step'
   | 'jump'
   | 'land'
-  | 'swing'
+  | 'swordSwing'
+  | 'axeSwing'
   | 'hit'
   | 'crit'
+  | 'hurt'
+  | 'death'
   | 'place'
   | 'break'
   | 'mine'
@@ -28,6 +31,7 @@ export class AudioManager {
   private musicTimer: number | null = null;
   private musicStep = 0;
   private started = false;
+  private readonly lastPlayed = new Map<Sfx, number>();
 
   /** Must be called from a user gesture (pointer lock / click) to unlock audio. */
   resume(): void {
@@ -57,6 +61,17 @@ export class AudioManager {
 
   play(name: Sfx): void {
     if (!this.ctx) return;
+    const nowMs = performance.now();
+    const minGapMs = name === 'death' ? 500
+      : name === 'hurt' ? 90
+        : name === 'crit' ? 70
+          : name === 'hit' ? 45
+            : name === 'axeSwing' ? 90
+              : name === 'swordSwing' ? 60
+                : 0;
+    if (nowMs - (this.lastPlayed.get(name) ?? -Infinity) < minGapMs) return;
+    this.lastPlayed.set(name, nowMs);
+
     const c = this.ctx;
     const t = c.currentTime;
     switch (name) {
@@ -66,12 +81,20 @@ export class AudioManager {
         this.tone('square', 320, 520, 0.10, 0.12, t); break;
       case 'land':
         this.noise(0.10, 400, 0.18, t); break;
-      case 'swing':
-        this.noise(0.09, 1600, 0.14, t, 'highpass'); break;
+      case 'swordSwing':
+        this.noise(0.09, 1700, 0.13, t, 'highpass');
+        this.tone('triangle', 420, 260, 0.08, 0.08, t); break;
+      case 'axeSwing':
+        this.noise(0.13, 900, 0.18, t, 'highpass');
+        this.tone('sawtooth', 190, 105, 0.11, 0.09, t); break;
       case 'hit':
         this.tone('square', 180, 90, 0.12, 0.22, t); this.noise(0.06, 500, 0.12, t); break;
       case 'crit':
         this.tone('sawtooth', 240, 120, 0.14, 0.22, t); this.tone('square', 600, 900, 0.10, 0.14, t + 0.02); break;
+      case 'hurt':
+        this.tone('sawtooth', 155, 95, 0.16, 0.17, t); this.noise(0.08, 420, 0.08, t); break;
+      case 'death':
+        this.tone('sawtooth', 180, 45, 0.42, 0.22, t); this.noise(0.24, 320, 0.14, t + 0.04); break;
       case 'place':
         this.tone('triangle', 180, 220, 0.07, 0.14, t); break;
       case 'break':

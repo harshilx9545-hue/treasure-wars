@@ -9,7 +9,6 @@ import {
   BLOCKS,
   TICK_MS,
   REACH,
-  ATTACK_REACH,
   PLAYER_EYE,
   PLAYER_HALF_W,
   PLAYER_HEIGHT,
@@ -25,6 +24,9 @@ import {
   ECONOMY,
   WEAPONS,
   WeaponId,
+  SWORD_WEAPON_MASK,
+  weaponForSwordTier,
+  isAxeWeapon,
   isBed,
   type MoveInput,
   type PlayerPhysics,
@@ -50,6 +52,7 @@ import { Menu } from './menu';
 import { Particles } from './particles';
 import { Mining } from './mining';
 import { ViewModel } from './viewModel';
+import { preloadPirateAssets } from './piratePreloader';
 import { initGraphics } from './graphics';
 import { Lobby } from './lobby';
 import { Shop } from './shop';
@@ -128,6 +131,16 @@ const entities = new EntityRenderer(scene);
 const shop = new Shop();
 const endScreen = new EndScreen();
 const objective = new Objective();
+const pirateAssetsReady = preloadPirateAssets(renderer, scene, camera);
+async function waitForPirateAssets(): Promise<void> {
+  try {
+    await pirateAssetsReady;
+  } catch (error) {
+    // Missing assets are reported by their loaders; keep the menu responsive
+    // and allow supported cached visuals to remain usable.
+    console.error('[bedwars] Pirate asset preload did not fully complete', error);
+  }
+}
 endScreen.onPlayAgain = () => { playAgainRequested = true; room?.send(Msg.Rematch, {}); };
 endScreen.onReturnLobby = () => { playAgainRequested = false; room?.send(Msg.Rematch, {}); };
 
@@ -166,8 +179,8 @@ let shake = 0;
 let offlineDead = false;
 let offlineDeadUntil = 0;
 let placeCooldown = 0;
+let nextLocalAttackAt = 0;
 const PLACE_COOLDOWN = 0.16; // seconds between placements while holding RMB (Minecraft-like)
-let blocking = false; // shield raised
 const pending: MoveInput[] = [];
 let batch: MoveInput[] = [];
 let sendTimer = 0;
@@ -198,7 +211,7 @@ const localMe: any = {
   wool: 0, plank: 0, stone: 0,
   swordTier: 0, pickTier: 0, shears: false,
   tnt: 0, pearls: 0, fireballs: 0, alarms: 0,
-  weapon: WeaponId.IronSword, weapons: 1 << WeaponId.IronSword, blocking: false,
+  weapon: WeaponId.Dagger, weapons: 1 << WeaponId.Dagger,
   effects: new Map<string, number>(),
 };
 const localTeam = { armorTier: 0, genLevel: 0 };
@@ -232,7 +245,7 @@ function myTeamNow(me: any): number {
 
 /** Rebuild the hotbar layout when the owned-weapon set / team changes. */
 function rebuildHotbar(me: any): void {
-  const owned = me?.weapons ?? (1 << WeaponId.IronSword);
+  const owned = me?.weapons ?? (1 << WeaponId.Dagger);
   const team = myTeamNow(me);
   const sig = `${owned}#${team}`;
   if (sig === hotbarOwnedSig) return;
@@ -262,7 +275,7 @@ function slotCount(slot: Slot, me: any): number {
 
 function renderHotbar(me: any): void {
   rebuildHotbar(me);
-  const sig = HOTBAR.map((s, i) => `${i === activeSlot ? '*' : ''}${slotCount(s, me)}`).join('|');
+  const sig = `${me?.swordTier ?? 0}|${HOTBAR.map((s, i) => `${i === activeSlot ? '*' : ''}${slotCount(s, me)}`).join('|')}`;
   if (sig === hotbarSig) return;
   hotbarSig = sig;
   hotbarEl.innerHTML = HOTBAR.map((s, i) => {
@@ -302,8 +315,6 @@ function selectSlot(i: number): void {
     if (room) room.send(Msg.Weapon, { weapon: s.weapon });
     else localMe.weapon = s.weapon;
     lastEquippedWeapon = s.weapon;
-    // dropping a raised shield when switching away
-    if (blocking && s.weapon !== WeaponId.Shield) setBlocking(false);
   }
   audio.play('click');
   hotbarSig = '';
@@ -368,14 +379,6 @@ function canPlay(): boolean {
   return ((room?.state as any)?.phase ?? 'lobby') === 'playing';
 }
 
-function setBlocking(on: boolean): void {
-  if (blocking === on) return;
-  blocking = on;
-  viewModel.setBlocking(on);
-  if (room) room.send(Msg.Block, { blocking: on });
-  else localMe.blocking = on;
-}
-
 function activeWeaponDef() {
   const s = HOTBAR[activeSlot];
   if (s && s.kind === 'weapon' && s.weapon !== undefined) return WEAPONS[s.weapon];
@@ -400,11 +403,8 @@ function localBuy(id: string): void {
       if (me.coinsEarned < b.unlockCoinsEarned) { notice(`Stone unlocks after earning ${b.unlockCoinsEarned} coins`, false); return; }
       if (!charge(b.price * b.stack)) return; me.stone += b.stack; notice(`+${b.stack} Stone`, true); break;
     }
+    case 'sword': buySwordLocal(charge, notice); break;
     case 'weapon_axe': buyWeaponLocal(WeaponId.Axe, charge, notice); break;
-    case 'weapon_pickaxe': buyWeaponLocal(WeaponId.Pickaxe, charge, notice); break;
-    case 'weapon_spear': buyWeaponLocal(WeaponId.Spear, charge, notice); break;
-    case 'weapon_bow': buyWeaponLocal(WeaponId.Bow, charge, notice); break;
-    case 'weapon_shield': buyWeaponLocal(WeaponId.Shield, charge, notice); break;
     case 'weapon_doubleaxe': buyWeaponLocal(WeaponId.DoubleAxe, charge, notice); break;
     case 'armor': { const n = team.armorTier + 1; if (n >= ECONOMY.armor.length) { notice('Max armor tier', false); return; } if (!charge(ECONOMY.armor[n].price)) return; team.armorTier = n; notice(`Team armor: ${ECONOMY.armor[n].name}`, true); break; }
     case 'pick': { const n = me.pickTier + 1; if (n >= ECONOMY.pickaxes.length) { notice('Max pickaxe tier', false); return; } if (!charge(ECONOMY.pickaxes[n].price)) return; me.pickTier = n; notice(`Bought ${ECONOMY.pickaxes[n].name}`, true); break; }
@@ -420,6 +420,19 @@ function localBuy(id: string): void {
   shop.refresh();
 }
 
+function buySwordLocal(charge: (c: number) => boolean, notice: (t: string, ok: boolean) => void): void {
+  const nextTier = localMe.swordTier + 1;
+  if (nextTier >= ECONOMY.swords.length) { notice('Max sword tier', false); return; }
+  const tier = ECONOMY.swords[nextTier];
+  if (!charge(tier.price)) return;
+  const nextWeapon = weaponForSwordTier(nextTier);
+  localMe.swordTier = nextTier;
+  localMe.weapons = (localMe.weapons & ~SWORD_WEAPON_MASK) | (1 << nextWeapon);
+  localMe.weapon = nextWeapon;
+  hotbarOwnedSig = '';
+  notice(`Bought ${tier.name}`, true);
+}
+
 function buyWeaponLocal(w: WeaponId, charge: (c: number) => boolean, notice: (t: string, ok: boolean) => void): void {
   const def = WEAPONS[w];
   if ((localMe.weapons >> w) & 1) { notice(`Already own ${def.name}`, false); return; }
@@ -431,12 +444,12 @@ function buyWeaponLocal(w: WeaponId, charge: (c: number) => boolean, notice: (t:
 }
 
 // ------- Attack targeting -------
-function findAttackTarget(): string | null {
-  const weapon = activeWeaponDef();
+function findAttackTarget(range: number, team: number): string | null {
   return remotes.findTarget(
     camera.position.x, camera.position.y, camera.position.z,
     rayDir.x, rayDir.y, rayDir.z,
-    (weapon?.range ?? ATTACK_REACH) + 0.8,
+    range,
+    team,
   );
 }
 
@@ -450,20 +463,21 @@ input.onMouseDown = (button) => {
   const wdef = activeWeaponDef();
 
   if (button === 0) {
-    // Melee attack with the active weapon (shields can't melee).
-    if (wdef?.shield) return;
-    const targetId = findAttackTarget();
+    if (!wdef) return;
+    const attackNow = Date.now();
+    if (attackNow < nextLocalAttackAt) return;
+    nextLocalAttackAt = attackNow + wdef.cooldownMs;
+    camera.getWorldDirection(rayDir);
+    const targetId = findAttackTarget(wdef.range, myTeamNow(me));
     const crit = !phys.onGround && phys.vy < -0.15;
     viewModel.swing(crit);
-    audio.play('swing');
+    audio.play(isAxeWeapon(wdef.id) ? 'axeSwing' : 'swordSwing');
     if (targetId && room) room.send(Msg.Attack, { target: targetId, crit });
     return;
   }
 
   if (button === 2) {
     camera.getWorldDirection(rayDir);
-    // Weapon-specific right-click: shield block.
-    if (wdef?.shield) { setBlocking(true); return; }
 
     const slot = HOTBAR[activeSlot];
     if (slot.kind === 'block') {
@@ -484,12 +498,6 @@ input.onMouseDown = (button) => {
       }
     }
   }
-};
-
-input.onMouseUp = (button) => {
-  if (button !== 2) return;
-  // Release shield.
-  if (blocking) setBlocking(false);
 };
 
 function placeableAt(gx: number, gy: number, gz: number): boolean {
@@ -614,9 +622,11 @@ function attachRoomHandlers(r: Room): void {
     if (h.crit) particles.crit(h.x, h.y, h.z); else particles.hit(h.x, h.y, h.z);
     if (h.target !== myId) remotes.hitFlash(h.target);
     if (h.by !== myId) remotes.playAttack(h.by); // sync the attacker's swing animation
-    if (h.by === myId) { hud.showHitMarker(h.crit); audio.play(h.crit ? 'crit' : 'hit'); }
-    else if (h.target === myId) { audio.play('hit'); hud.flashDamage(); }
-    else audio.play('hit');
+    if (h.by === myId) {
+      hud.showHitMarker(h.crit);
+      audio.play(h.crit ? 'crit' : 'hit');
+    }
+    if (h.target === myId) hud.flashDamage();
   });
   r.onMessage(Msg.BedDestroyed, (e: BedDestroyedEvent) => {
     audio.play('bed');
@@ -660,8 +670,11 @@ function attachRoomHandlers(r: Room): void {
 // ------- Lobby wiring -------
 const lobby = new Lobby({
   onRoomConnected: (r) => { room = r; offline = false; myId = r.sessionId; attachRoomHandlers(r); },
-  onMatchStart: (r) => {
-    room = r; offline = false; myId = r.sessionId; started = true; menu.started = true;
+  onMatchStart: async (r) => {
+    room = r; offline = false; myId = r.sessionId;
+    await waitForPirateAssets();
+    if (room !== r) return;
+    started = true; menu.started = true;
     menu.onCloseSettings = undefined;
     audio.resume();
     // Show a click-to-play splash so pointer lock is engaged from a real user
@@ -669,8 +682,11 @@ const lobby = new Lobby({
     // requestPointerLock() would be rejected and they'd appear frozen.
     menu.showReady();
   },
-  onOffline: () => {
-    room = null; offline = true; started = true; menu.started = true;
+  onOffline: async () => {
+    room = null; offline = true;
+    await waitForPirateAssets();
+    if (!offline) return;
+    started = true; menu.started = true;
     offlineDead = false;
     menu.onCloseSettings = undefined;
     // Free starting loadout, same as the server grants at match start.
@@ -678,6 +694,7 @@ const lobby = new Lobby({
     localMe.coins = 0; localMe.coinsEarned = 0;
     localMe.wool = ECONOMY.starting.wool; localMe.plank = 0; localMe.stone = 0;
     localMe.swordTier = ECONOMY.starting.swordTier; localMe.pickTier = 0; localMe.shears = false;
+    localMe.weapon = WeaponId.Dagger; localMe.weapons = 1 << WeaponId.Dagger;
     localMe.tnt = 0; localMe.pearls = 0; localMe.fireballs = 0; localMe.alarms = 0;
     localTeam.armorTier = 0; localTeam.genLevel = 0;
     coinAcc = 0;
@@ -764,13 +781,26 @@ function frame(now: number): void {
         return;
       }
       if (!remotes.has(id)) remotes.add(id, p.team);
-      remotes.updateTarget(id, p.x, p.y, p.z, p.yaw, !!p.alive, p.weapon ?? 0, p.name ?? '');
+      remotes.updateTarget(
+        id,
+        p.x,
+        p.y,
+        p.z,
+        p.yaw,
+        !!p.alive,
+        p.weapon ?? 0,
+        p.name ?? '',
+        p.vx ?? 0,
+        p.vy ?? 0,
+        p.vz ?? 0,
+      );
     });
     remotes.prune(seen);
   }
 
   // --- Match end: play stinger + show Victory/Defeat screen, then freeze. ---
   const winnerNow: number = (room?.state as any)?.winner ?? -1;
+  remotes.setCelebratingTeam(ended ? winnerNow : -1);
   if (winnerNow !== prevWinner && winnerNow >= 0) prevWinner = winnerNow;
   if (ended && !endShown && winnerNow >= 0) {
     endShown = true;
@@ -810,10 +840,10 @@ function frame(now: number): void {
       phys.x = me.x; phys.y = me.y; phys.z = me.z; phys.vx = 0; phys.vz = 0; phys.vy = 0;
       pending.length = 0; batch = [];
     }
-    if (me && prevAlive && !me.alive) { deadSince = now; audio.play('defeat'); }
+    if (me && prevAlive && !me.alive) { deadSince = now; audio.play('death'); }
     prevAlive = alive;
 
-    if (me && me.hp < prevHp && me.alive) hud.flashDamage();
+    if (me && me.hp < prevHp && me.alive) { audio.play('hurt'); hud.flashDamage(); }
     if (me) prevHp = me.hp;
 
     const sprinting = input.locked && input.sprint && input.moveZ > 0 && alive;
@@ -852,7 +882,7 @@ function frame(now: number): void {
       offlineDead = true;
       offlineDeadUntil = epochNow + RESPAWN_SECONDS * 1000;
       deadSince = now;
-      audio.play('defeat');
+      audio.play('death');
     }
 
     remotes.update(dt);
@@ -885,7 +915,10 @@ function frame(now: number): void {
     camera.getWorldDirection(rayDir);
     const interactionActive = alive && input.locked && !shop.isOpen;
     const hit = interactionActive ? raycastVoxel(camera.position.x, camera.position.y, camera.position.z, rayDir.x, rayDir.y, rayDir.z, REACH, world.isSolid) : null;
-    const attackTarget = interactionActive ? findAttackTarget() : null;
+    const combatWeapon = activeWeaponDef();
+    const attackTarget = interactionActive && combatWeapon
+      ? findAttackTarget(combatWeapon.range, myTeamNow(me))
+      : null;
     const slot = HOTBAR[activeSlot];
 
     if (hit) {
@@ -906,7 +939,7 @@ function frame(now: number): void {
     const canMineBlock = wantMine && def?.breakable;
     // Mining speed: powerup haste × pickaxe tier × active-weapon break multiplier.
     const pickSpeed = ECONOMY.pickaxes[me?.pickTier ?? 0]?.speed ?? 1;
-    const weaponBreak = WEAPONS[(me?.weapon ?? WeaponId.IronSword) as WeaponId]?.breakMult ?? 1;
+    const weaponBreak = WEAPONS[(me?.weapon ?? WeaponId.Dagger) as WeaponId]?.breakMult ?? 1;
     const isWool = targetBlock >= BlockType.WoolRed && targetBlock <= BlockType.WoolYellow;
     const hasteMult = (mods.hasteMult ?? 1) * pickSpeed * weaponBreak * (me?.shears && isWool ? 1.6 : 1);
     viewModel.setMining(!!canMineBlock);

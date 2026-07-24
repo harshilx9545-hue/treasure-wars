@@ -16,7 +16,7 @@ export interface GeneratorLevel {
 
 export interface SwordTier {
   name: string;
-  price: number; // per-player upgrade cost (0 = starting wooden sword)
+  price: number; // per-player replacement cost (0 = starting dagger)
   damage: number;
 }
 
@@ -39,7 +39,7 @@ export const ECONOMY = {
   /** Free starting loadout so early game isn't a rush to the shop. */
   starting: {
     wool: 16,
-    swordTier: 0, // wooden sword
+    swordTier: 0, // dagger
   },
 
   generator: {
@@ -63,10 +63,10 @@ export const ECONOMY = {
   },
 
   swords: [
-    { name: 'Wooden Sword', price: 0, damage: 5 },
-    { name: 'Stone Sword', price: 10, damage: 6 },
-    { name: 'Iron Sword', price: 30, damage: 7.5 },
-    { name: 'Diamond Sword', price: 60, damage: 9 },
+    { name: 'Dagger', price: 0, damage: 5 },
+    { name: 'Normal Sword', price: 10, damage: 6 },
+    { name: 'Large Sword', price: 30, damage: 7.5 },
+    { name: 'Cutlass', price: 60, damage: 9 },
   ] as SwordTier[],
 
   armor: [
@@ -94,19 +94,14 @@ export const ECONOMY = {
   },
 } as const;
 
-/** Stable string ids used by the shop purchase protocol. */
+/** Stable string ids used by the existing shop purchase message. */
 export type ShopItemId =
   | 'block_wool'
   | 'block_plank'
   | 'block_stone'
-  // Weapons (WeaponId-based system; each is a one-time unlock)
   | 'weapon_axe'
-  | 'weapon_pickaxe'
-  | 'weapon_spear'
-  | 'weapon_bow'
-  | 'weapon_shield'
   | 'weapon_doubleaxe'
-  | 'sword' // legacy sword-tier upgrade (kept for compatibility)
+  | 'sword'
   | 'armor' // buys next armor tier (team)
   | 'pick' // buys next pickaxe tier
   | 'shears'

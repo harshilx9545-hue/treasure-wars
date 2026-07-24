@@ -1,21 +1,15 @@
-import { ECONOMY, TEAMS, WEAPONS, WeaponId, type ShopItemId } from '@bedwars/shared';
+import { ECONOMY, TEAMS, WEAPONS, WeaponId, weaponForSwordTier, type ShopItemId } from '@bedwars/shared';
 import { audio } from './audio';
 
-/** Maps a buyable weapon to its shop purchase id (server + offline both handle these). */
+/** Maps the two independently buyable axe weapons to existing purchase ids. */
 const WEAPON_SHOP_ID: Partial<Record<WeaponId, ShopItemId>> = {
   [WeaponId.Axe]: 'weapon_axe',
-  [WeaponId.Pickaxe]: 'weapon_pickaxe',
-  [WeaponId.Spear]: 'weapon_spear',
-  [WeaponId.Bow]: 'weapon_bow',
-  [WeaponId.Shield]: 'weapon_shield',
   [WeaponId.DoubleAxe]: 'weapon_doubleaxe',
 };
 
 function weaponDesc(id: WeaponId): string {
   const w = WEAPONS[id];
   const aps = (1000 / w.cooldownMs).toFixed(1);
-  if (w.shield) return `Blocks melee & knockback. Slows you while raised.`;
-  if (w.ranged) return `Ranged arrow âˆ™ ${w.damage} dmg âˆ™ range ${w.range.toFixed(0)}`;
   return `Dmg ${w.damage} · ${aps} hits/s · range ${w.range.toFixed(1)}${w.breakMult > 1.2 ? ` · mines x${w.breakMult}` : ''}`;
 }
 
@@ -102,8 +96,22 @@ export class Shop {
       case 'Weapons': {
         const owned: number = me.weapons ?? 0;
         const rows: Row[] = [];
-        // Iron Sword is the starting weapon — shown as owned for context.
-        rows.push({ name: WEAPONS[WeaponId.IronSword].name, desc: weaponDesc(WeaponId.IronSword), price: 0, id: 'weapon_axe', disabled: true, note: 'STARTER', color: WEAPONS[WeaponId.IronSword].color });
+        const tier = Math.max(0, Math.min(ECONOMY.swords.length - 1, Number(me.swordTier) || 0));
+        const currentSword = weaponForSwordTier(tier);
+        const current = WEAPONS[currentSword];
+        rows.push({
+          name: current.name, desc: weaponDesc(currentSword), price: 0, id: 'sword',
+          disabled: true, note: tier === 0 ? 'STARTER' : 'EQUIPPED', color: current.color,
+        });
+        const nextTier = tier + 1;
+        if (nextTier < ECONOMY.swords.length) {
+          const nextSword = weaponForSwordTier(nextTier);
+          const next = WEAPONS[nextSword];
+          rows.push({
+            name: next.name, desc: weaponDesc(nextSword), price: ECONOMY.swords[nextTier].price,
+            id: 'sword', color: next.color,
+          });
+        }
         for (const def of Object.values(WEAPONS)) {
           const sid = WEAPON_SHOP_ID[def.id];
           if (!sid) continue;

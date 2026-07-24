@@ -27,9 +27,6 @@ export const VOID_Y = -12;
 export const RESPAWN_SECONDS = 3;
 
 // Combat
-export const SWORD_DAMAGE = 5; // wooden sword, half-hearts *? -> 5 hp
-export const FIST_DAMAGE = 2;
-export const ATTACK_COOLDOWN_MS = 450;
 export const KNOCKBACK_H = 8.5; // horizontal impulse
 export const KNOCKBACK_V = 6.5; // vertical impulse
 export const CRIT_MULT = 1.5;
